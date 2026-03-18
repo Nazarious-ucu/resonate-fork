@@ -64,6 +64,8 @@ const (
 		promises
 	WHERE
 		state = 1 AND timeout <= $1
+	ORDER BY
+		sort_id ASC
 	LIMIT
 		$2`
 

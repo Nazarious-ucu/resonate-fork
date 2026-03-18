@@ -4,14 +4,17 @@ services:
     container_name: resonate
     command:
       - serve
+      - --aio-store-sqlite-enable=false
       - --aio-store-postgres-enable
       - "true"
       - --aio-store-postgres-host
-      - postgres
+      - yb-node1
+      - --aio-store-postgres-port
+      - "5433"
       - --aio-store-postgres-username
-      - username
+      - yugabyte
       - --aio-store-postgres-password
-      - password
+      - yugabyte
       - --aio-store-postgres-database
       - resonate
       - --aio-store-postgres-query
@@ -23,22 +26,82 @@ services:
       - "8002:8002"
       - "50051:50051"
     depends_on:
-      - postgres
-  postgres:
-    image: postgres:15
-    container_name: postgres
-    environment:
-      POSTGRES_USER: username
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: resonate
+      yb-init:
+        condition: service_completed_successfully
+
+  yb-node1:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node1
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node1
+      - --cloud_location=cloud.region.zone1
+      - --fault_tolerance=zone
     ports:
-      - "5432:5432"
-    read_only: true
-    tmpfs: /var/run/postgresql:rw,nosuid,nodev,noexec,mode=1777
-    security_opt:
-      - no-new-privileges:true
+      - "5433:5433"
+      - "7001:7000"
+      - "9000:9000"
+      - "15433:15433"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U username -d resonate"]
+      test: ["CMD-SHELL", "yugabyted status | grep -q 'Running'"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 20
+
+  yb-node2:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node2
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node2
+      - --join=yb-node1
+      - --cloud_location=cloud.region.zone2
+      - --fault_tolerance=zone
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+
+  yb-node3:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node3
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node3
+      - --join=yb-node1
+      - --cloud_location=cloud.region.zone3
+      - --fault_tolerance=zone
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+
+  yb-init:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-init
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+      yb-node2:
+        condition: service_started
+      yb-node3:
+        condition: service_started
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        until ysqlsh -h yb-node1 -U yugabyte -c '\l' 2>/dev/null; do
+          echo "Waiting for YSQL to be ready..."
+          sleep 2
+        done
+        echo "Configuring replication factor 3..."
+        yb-admin -master_addresses yb-node1:7100,yb-node2:7100,yb-node3:7100 \
+          modify_placement_info cloud.region.zone1,cloud.region.zone2,cloud.region.zone3 3
+        echo "Creating resonate database..."
+        ysqlsh -h yb-node1 -U yugabyte -c "SELECT 'exists' FROM pg_database WHERE datname='resonate'" | grep -q exists || \
+          ysqlsh -h yb-node1 -U yugabyte -c "CREATE IF NOT EXIST DATABASE resonate"
+        echo "Database ready."
+    restart: "no"

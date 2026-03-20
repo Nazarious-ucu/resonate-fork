@@ -5,19 +5,19 @@ services:
     command:
       - serve
       - --aio-store-sqlite-enable=false
-      - --aio-store-postgres-enable
+      - --aio-store-yugabyte-enable
       - "true"
-      - --aio-store-postgres-host
+      - --aio-store-yugabyte-host
       - yb-node1
-      - --aio-store-postgres-port
+      - --aio-store-yugabyte-port
       - "5433"
-      - --aio-store-postgres-username
+      - --aio-store-yugabyte-username
       - yugabyte
-      - --aio-store-postgres-password
+      - --aio-store-yugabyte-password
       - yugabyte
-      - --aio-store-postgres-database
+      - --aio-store-yugabyte-database
       - resonate
-      - --aio-store-postgres-query
+      - --aio-store-yugabyte-query
       - sslmode=disable
     volumes:
       - ./resonate.yml:/root/resonate.yml
@@ -102,6 +102,6 @@ services:
           modify_placement_info cloud.region.zone1,cloud.region.zone2,cloud.region.zone3 3
         echo "Creating resonate database..."
         ysqlsh -h yb-node1 -U yugabyte -c "SELECT 'exists' FROM pg_database WHERE datname='resonate'" | grep -q exists || \
-          ysqlsh -h yb-node1 -U yugabyte -c "CREATE IF NOT EXIST DATABASE resonate"
+          ysqlsh -h yb-node1 -U yugabyte -c "CREATE DATABASE resonate"
         echo "Database ready."
     restart: "no"

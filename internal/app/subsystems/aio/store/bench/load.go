@@ -23,6 +23,9 @@ type LoadConfig struct {
 	Duration time.Duration
 	// Backend is a label written into results (e.g. "postgres", "yugabyte-3node").
 	Backend string
+	// Collector receives per-operation records if non-nil.
+	// Set via NewMetricsCollectorFromEnv() in the calling test.
+	Collector *MetricsCollector
 }
 
 // Stats contains the aggregated results of a load test run.
@@ -91,6 +94,14 @@ func RunLoadTest(ctx context.Context, s store.Store, cfg LoadConfig) Stats {
 				start := time.Now()
 				_, err := s.Execute([]*t_aio.Transaction{tx})
 				elapsed := time.Since(start)
+
+				cfg.Collector.Record(
+					cfg.Backend,
+					"create_promise",
+					"load",
+					float64(elapsed.Microseconds())/1000.0,
+					err == nil,
+				)
 
 				if err != nil {
 					errors.Add(1)

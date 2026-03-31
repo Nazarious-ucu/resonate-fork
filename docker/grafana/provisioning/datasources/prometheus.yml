@@ -1,0 +1,15 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    url: http://prometheus:9090
+    access: proxy
+    isDefault: true
+    jsonData:
+      httpMethod: POST
+      # Match the Prometheus scrape interval so Grafana uses the right step.
+      timeInterval: "5s"
+      exemplarTraceIdDestinations: []
+    editable: false

@@ -129,10 +129,13 @@ func resolvePromiseTx(id string) *t_aio.Transaction {
 }
 
 // BenchmarkCreatePromise measures sequential promise creation throughput.
-func BenchmarkCreatePromise(b *testing.B, s store.Store) {
+func BenchmarkCreatePromise(b *testing.B, s store.Store, c *MetricsCollector) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := s.Execute([]*t_aio.Transaction{createPromiseTx(uid("create"))}); err != nil {
+		t0 := time.Now()
+		_, err := s.Execute([]*t_aio.Transaction{createPromiseTx(uid("create"))})
+		c.Record(dbTypeLabel(b), "create_promise", "BenchmarkCreatePromise", toMs(time.Since(t0)), err == nil)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -140,7 +143,7 @@ func BenchmarkCreatePromise(b *testing.B, s store.Store) {
 
 // BenchmarkReadPromise measures read throughput for a pre-existing promise.
 // Only the reads are measured; seeding happens before b.ResetTimer.
-func BenchmarkReadPromise(b *testing.B, s store.Store) {
+func BenchmarkReadPromise(b *testing.B, s store.Store, c *MetricsCollector) {
 	seedID := uid("read-seed")
 	if _, err := s.Execute([]*t_aio.Transaction{createPromiseTx(seedID)}); err != nil {
 		b.Fatal("seed:", err)
@@ -148,7 +151,10 @@ func BenchmarkReadPromise(b *testing.B, s store.Store) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := s.Execute([]*t_aio.Transaction{readPromiseTx(seedID)}); err != nil {
+		t0 := time.Now()
+		_, err := s.Execute([]*t_aio.Transaction{readPromiseTx(seedID)})
+		c.Record(dbTypeLabel(b), "read_promise", "BenchmarkReadPromise", toMs(time.Since(t0)), err == nil)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -156,7 +162,7 @@ func BenchmarkReadPromise(b *testing.B, s store.Store) {
 
 // BenchmarkUpdatePromise measures state-transition throughput (pending → resolved).
 // Only the UPDATE is timed; CREATE is done outside the timer.
-func BenchmarkUpdatePromise(b *testing.B, s store.Store) {
+func BenchmarkUpdatePromise(b *testing.B, s store.Store, c *MetricsCollector) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		id := uid("update")
@@ -167,7 +173,10 @@ func BenchmarkUpdatePromise(b *testing.B, s store.Store) {
 		}
 		b.StartTimer()
 
-		if _, err := s.Execute([]*t_aio.Transaction{resolvePromiseTx(id)}); err != nil {
+		t0 := time.Now()
+		_, err := s.Execute([]*t_aio.Transaction{resolvePromiseTx(id)})
+		c.Record(dbTypeLabel(b), "update_promise", "BenchmarkUpdatePromise", toMs(time.Since(t0)), err == nil)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -175,11 +184,14 @@ func BenchmarkUpdatePromise(b *testing.B, s store.Store) {
 
 // BenchmarkCreatePromiseParallel measures concurrent promise creation throughput.
 // Run with -cpu 1,2,4,8 to observe scaling behaviour.
-func BenchmarkCreatePromiseParallel(b *testing.B, s store.Store) {
+func BenchmarkCreatePromiseParallel(b *testing.B, s store.Store, c *MetricsCollector) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			if _, err := s.Execute([]*t_aio.Transaction{createPromiseTx(uid("par"))}); err != nil {
+			t0 := time.Now()
+			_, err := s.Execute([]*t_aio.Transaction{createPromiseTx(uid("par"))})
+			c.Record(dbTypeLabel(b), "create_promise_parallel", "BenchmarkCreatePromiseParallel", toMs(time.Since(t0)), err == nil)
+			if err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -191,7 +203,7 @@ func BenchmarkCreatePromiseParallel(b *testing.B, s store.Store) {
 // Each run seeds 200 promises under a unique ID prefix so the search only
 // touches those 200 rows, regardless of how many rows prior benchmarks have
 // inserted into the same table. This keeps latency stable across -count runs.
-func BenchmarkSearchPromises(b *testing.B, s store.Store) {
+func BenchmarkSearchPromises(b *testing.B, s store.Store, c *MetricsCollector) {
 	// Unique prefix for this run — used in both the seeded IDs and the search
 	// pattern so the query can use the B-tree index on `id`.
 	runPrefix := uid("srch")
@@ -207,7 +219,8 @@ func BenchmarkSearchPromises(b *testing.B, s store.Store) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := s.Execute([]*t_aio.Transaction{{
+		t0 := time.Now()
+		_, err := s.Execute([]*t_aio.Transaction{{
 			Commands: []t_aio.Command{
 				&t_aio.SearchPromisesCommand{
 					Id:     searchPattern,
@@ -216,7 +229,9 @@ func BenchmarkSearchPromises(b *testing.B, s store.Store) {
 					Limit:  100,
 				},
 			},
-		}}); err != nil {
+		}})
+		c.Record(dbTypeLabel(b), "search_promises", "BenchmarkSearchPromises", toMs(time.Since(t0)), err == nil)
+		if err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -246,9 +261,21 @@ func RunAll(b *testing.B, s store.Store) {
 	backend := os.Getenv("BENCH_BACKEND")
 	var results []MicroResult
 
-	run := func(name string, fn func(*testing.B, store.Store)) {
+	collector, err := NewMetricsCollectorFromEnv()
+	if err != nil {
+		b.Logf("WARNING: could not create metrics collector: %v", err)
+	}
+	defer func() {
+		if collector != nil {
+			if cerr := collector.Close(); cerr != nil {
+				b.Logf("WARNING: metrics collector close: %v", cerr)
+			}
+		}
+	}()
+
+	run := func(name string, fn func(*testing.B, store.Store, *MetricsCollector)) {
 		b.Run(name, func(b *testing.B) {
-			fn(b, s)
+			fn(b, s, collector)
 			// b.Elapsed() returns the framework-measured time (honours
 			// ResetTimer / StopTimer / StartTimer), so ns/op is accurate.
 			elapsed := b.Elapsed()
@@ -279,4 +306,18 @@ func RunAll(b *testing.B, s store.Store) {
 			b.Logf("micro-benchmark results written to %s", csvPath)
 		}
 	}
+}
+
+// dbTypeLabel extracts the BENCH_BACKEND env var to use as the db_type label.
+// Falls back to "unknown" so records are always labelled.
+func dbTypeLabel(_ *testing.B) string {
+	if v := os.Getenv("BENCH_BACKEND"); v != "" {
+		return v
+	}
+	return "unknown"
+}
+
+// toMs converts a time.Duration to milliseconds as a float64.
+func toMs(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000.0
 }

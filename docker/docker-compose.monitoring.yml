@@ -1,0 +1,84 @@
+# Monitoring overlay — adds Prometheus, Grafana, and Pushgateway.
+#
+# Designed to be run together with docker-compose.fault-tolerance.yml:
+#
+#   docker compose \
+#     -f docker/docker-compose.fault-tolerance.yml \
+#     -f docker/docker-compose.monitoring.yml \
+#     up -d
+#
+# Endpoints:
+#   Prometheus  → http://localhost:9090
+#   Grafana     → http://localhost:3000  (admin / admin)
+#   Pushgateway → http://localhost:9091
+#
+# The fault-tolerance test runner exposes its own /metrics on :9092 (the host).
+# Prometheus scrapes it via host.docker.internal:9092, which Docker maps to the
+# host on macOS/Windows automatically.  On Linux, the extra_hosts entry below
+# maps the name to the Docker bridge gateway (Docker 20.10+ "host-gateway").
+#
+# Env-var overrides accepted by the test runner:
+#   METRICS_ADDR=:9092        (default)
+#   PUSHGATEWAY_URL=http://localhost:9091   (default)
+
+services:
+
+  # ── Prometheus ───────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.3.1
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      # Linux: maps host.docker.internal → Docker bridge gateway so Prometheus
+      # can scrape metrics served on the host (e.g. the fault-tolerance test runner).
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ── Grafana ──────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.6.1
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/fault_tolerance.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ── Pushgateway ──────────────────────────────────────────────────────────────
+  # Accepts metric pushes from short-lived test runs so Prometheus can scrape
+  # them even after the test process has exited.
+  pushgateway:
+    image: prom/pushgateway:v1.11.1
+    container_name: pushgateway
+    command:
+      - --persistence.file=/data/pushgateway.db
+      - --persistence.interval=5m
+    volumes:
+      - pushgateway_data:/data
+    ports:
+      - "9091:9091"
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  pushgateway_data:

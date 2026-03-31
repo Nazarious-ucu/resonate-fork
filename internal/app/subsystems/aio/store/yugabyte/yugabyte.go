@@ -282,7 +282,12 @@ type Config struct {
 	Size            int               `flag:"size" desc:"submission buffered channel size" default:"1000"`
 	BatchSize       int               `flag:"batch-size" desc:"max submissions processed per iteration" default:"1000"`
 	Workers         int               `flag:"workers" desc:"number of workers" default:"1" dst:"1"`
+	MaxOpenConns    int               `flag:"max-open-conns" desc:"maximum number of open database connections (0 defaults to workers)" default:"0"`
+	MaxIdleConns    int               `flag:"max-idle-conns" desc:"maximum number of idle database connections (0 defaults to workers)" default:"0"`
+	ConnMaxIdleTime time.Duration     `flag:"conn-max-idle-time" desc:"maximum amount of time a connection may be idle" default:"10s"`
+	ConnMaxLifetime time.Duration     `flag:"conn-max-lifetime" desc:"maximum amount of time a connection may be reused" default:"30s"`
 	Host            string            `flag:"host" desc:"yugabyte host" default:"localhost"`
+	FallbackHosts   string            `flag:"fallback-hosts" desc:"comma-separated additional hosts for multi-node failover (e.g. yb-node2,yb-node3)" default:""`
 	Port            string            `flag:"port" desc:"yugabyte YSQL port" default:"5433"`
 	Username        string            `flag:"username" desc:"yugabyte username" default:"yugabyte"`
 	Password        string            `flag:"password" desc:"yugabyte password" default:"yugabyte"`
@@ -340,12 +345,13 @@ func (s *YugabyteStore) DB() *sql.DB {
 }
 
 type ConnConfig struct {
-	Host     string
-	Port     string
-	Username string
-	Password string
-	Database string
-	Query    map[string]string
+	Host          string
+	FallbackHosts string // comma-separated extra hosts, same port as Host
+	Port          string
+	Username      string
+	Password      string
+	Database      string
+	Query         map[string]string
 }
 
 func NewConn(config *ConnConfig) (*sql.DB, error) {
@@ -354,15 +360,27 @@ func NewConn(config *ConnConfig) (*sql.DB, error) {
 		rawQuery = append(rawQuery, fmt.Sprintf("%s=%s", q.Key, q.Value))
 	}
 
-	dbUrl := &url.URL{
-		User:     url.UserPassword(config.Username, config.Password),
-		Host:     fmt.Sprintf("%s:%s", config.Host, config.Port),
-		Path:     config.Database,
-		Scheme:   "postgres",
-		RawQuery: strings.Join(rawQuery, "&"),
+	// Build the host list: primary host + any fallback hosts, all on the same
+	// port.  Multiple hosts in the DSN allow the pgx smart driver to fall over
+	// to a live node when the primary contact node is unavailable, so the
+	// connection pool survives a primary-node kill without returning errors.
+	allHosts := []string{fmt.Sprintf("%s:%s", config.Host, config.Port)}
+	for _, h := range strings.Split(config.FallbackHosts, ",") {
+		h = strings.TrimSpace(h)
+		if h != "" {
+			allHosts = append(allHosts, fmt.Sprintf("%s:%s", h, config.Port))
+		}
 	}
 
-	return sql.Open("pgx", dbUrl.String())
+	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?%s",
+		url.QueryEscape(config.Username),
+		url.QueryEscape(config.Password),
+		strings.Join(allHosts, ","),
+		config.Database,
+		strings.Join(rawQuery, "&"),
+	)
+
+	return sql.Open("pgx", dsn)
 }
 
 func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore, error) {
@@ -382,14 +400,24 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 	if config.RefreshInterval > 0 {
 		query["yb_servers_refresh_interval"] = strconv.Itoa(config.RefreshInterval)
 	}
+	// Limit how long a single connection attempt to a dead node can block.
+	// Without this, when a YugaByte node disappears mid-graceful-shutdown the
+	// TCP SYN or in-flight query can hang until the OS TCP timeout fires (>60s),
+	// causing Resonate's HTTP handlers to time out and return network errors to
+	// callers.  2 seconds is enough for the smart driver to detect failure and
+	// the pool to open a replacement connection to a live node.
+	if _, set := query["connect_timeout"]; !set {
+		query["connect_timeout"] = "2"
+	}
 
 	connConfig := &ConnConfig{
-		Host:     config.Host,
-		Port:     config.Port,
-		Username: config.Username,
-		Password: config.Password,
-		Database: config.Database,
-		Query:    query,
+		Host:          config.Host,
+		FallbackHosts: config.FallbackHosts,
+		Port:          config.Port,
+		Username:      config.Username,
+		Password:      config.Password,
+		Database:      config.Database,
+		Query:         query,
 	}
 
 	db, err := NewConn(connConfig)
@@ -397,9 +425,18 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 		return nil, err
 	}
 
-	db.SetMaxOpenConns(config.Workers)
-	db.SetMaxIdleConns(config.Workers)
-	db.SetConnMaxIdleTime(0)
+	maxOpenConns := config.MaxOpenConns
+	if maxOpenConns <= 0 {
+		maxOpenConns = config.Workers
+	}
+	maxIdleConns := config.MaxIdleConns
+	if maxIdleConns <= 0 {
+		maxIdleConns = config.Workers
+	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
+	db.SetConnMaxIdleTime(config.ConnMaxIdleTime)
+	db.SetConnMaxLifetime(config.ConnMaxLifetime)
 
 	for i := 0; i < config.Workers; i++ {
 		workers[i] = &YugabyteStoreWorker{

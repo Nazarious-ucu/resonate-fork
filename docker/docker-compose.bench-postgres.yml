@@ -1,0 +1,82 @@
+# Postgres benchmark environment — single node with a containerised bench runner.
+#
+# ── Usage ────────────────────────────────────────────────────────────────────
+#
+# 1. Start Postgres:
+#      docker compose -f docker/docker-compose.bench-postgres.yml up -d postgres
+#
+# 2. Run micro-benchmarks:
+#      docker compose -f docker/docker-compose.bench-postgres.yml run --rm bench-runner
+#
+# 3. Run the sustained load test instead:
+#      docker compose -f docker/docker-compose.bench-postgres.yml run --rm \
+#        -e BENCH_TARGET=load \
+#        -e BENCH_LOAD_DURATION=60s \
+#        -e BENCH_CSV_PATH=/results/load.csv \
+#        bench-runner
+#      # Results are written to benchmarks/results/load.csv on your host.
+#
+# Tear down:
+#      docker compose -f docker/docker-compose.bench-postgres.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bench-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: resonate
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d resonate"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Tuned for benchmark workloads — NOT for production use.
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c work_mem=16MB
+        -c synchronous_commit=on
+        -c wal_level=minimal
+        -c max_wal_senders=0
+        -c fsync=on
+
+  bench-runner:
+    image: golang:1.24-alpine
+    container_name: postgres-bench-runner
+    volumes:
+      - ..:/workspace:ro
+      - ../benchmarks/results:/results
+    working_dir: /workspace
+    environment:
+      TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_HOST: postgres
+      TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_PORT: "5432"
+      TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_USERNAME: postgres
+      TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_PASSWORD: postgres
+      TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_DATABASE: resonate
+      BENCH_TARGET: ${BENCH_TARGET:-micro}
+      BENCH_LOAD_DURATION: ${BENCH_LOAD_DURATION:-60s}
+      BENCH_CSV_PATH: ${BENCH_CSV_PATH:-/results/load.csv}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ "$$BENCH_TARGET" = "load" ]; then
+          exec go test -run=^$$ -bench=BenchmarkPostgresStoreLoad \
+            -benchtime=1x -timeout 60m \
+            ./internal/app/subsystems/aio/store/postgres/
+        else
+          export BENCH_BACKEND=postgres
+          export BENCH_MICRO_CSV_PATH=/results/micro.csv
+          exec go test -run=^$$ -bench=^BenchmarkPostgresStore$$ \
+            -benchtime=30s -count=3 -benchmem -timeout 20m \
+            ./internal/app/subsystems/aio/store/postgres/
+        fi
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - bench

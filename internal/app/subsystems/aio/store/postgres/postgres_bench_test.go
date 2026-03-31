@@ -81,6 +81,18 @@ func BenchmarkPostgresStoreLoad(b *testing.B) {
 	}
 	csvPath := os.Getenv("BENCH_CSV_PATH")
 
+	collector, err := bench.NewMetricsCollectorFromEnv()
+	if err != nil {
+		b.Logf("WARNING: could not create metrics collector: %v", err)
+	}
+	defer func() {
+		if collector != nil {
+			if cerr := collector.Close(); cerr != nil {
+				b.Logf("WARNING: metrics collector close: %v", cerr)
+			}
+		}
+	}()
+
 	tiers := []int{1, 2, 4, 8, 16}
 	var results []bench.Stats
 
@@ -92,6 +104,7 @@ func BenchmarkPostgresStoreLoad(b *testing.B) {
 				NumWorkers: workers,
 				Duration:   duration,
 				Backend:    "postgres",
+				Collector:  collector,
 			})
 			b.ReportMetric(stats.OpsPerSec, "ops/s")
 			b.ReportMetric(float64(stats.LatencyP99.Microseconds()), "p99_us")

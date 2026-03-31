@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -17,23 +18,31 @@ import (
 func newYugabyteBenchStore(b *testing.B) *YugabyteStore {
 	b.Helper()
 	host := os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_HOST")
+	fallbackHosts := os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_FALLBACK_HOSTS")
+	loadBalance := false
+	if raw := os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_LOAD_BALANCE"); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			loadBalance = parsed
+		}
+	}
 	if host == "" {
 		b.Skip("YugabyteDB not configured (TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_HOST unset)")
 	}
 
 	m := metrics.New(prometheus.NewRegistry())
 	s, err := New(nil, m, &Config{
-		Workers:     4,
-		BatchSize:   1,
-		Host:        host,
-		Port:        os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PORT"),
-		Username:    os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_USERNAME"),
-		Password:    os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PASSWORD"),
-		Database:    os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_DATABASE"),
-		Query:       map[string]string{"sslmode": "disable"},
-		TxTimeout:   5 * time.Second,
-		LoadBalance: true,
-		MaxRetries:  3,
+		Workers:       4,
+		BatchSize:     1,
+		Host:          host,
+		FallbackHosts: fallbackHosts,
+		Port:          os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PORT"),
+		Username:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_USERNAME"),
+		Password:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PASSWORD"),
+		Database:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_DATABASE"),
+		Query:         map[string]string{"sslmode": "disable"},
+		TxTimeout:     5 * time.Second,
+		LoadBalance:   loadBalance,
+		MaxRetries:    3,
 	})
 	if err != nil {
 		b.Fatal("New:", err)
@@ -83,6 +92,18 @@ func BenchmarkYugabyteStoreLoad(b *testing.B) {
 	}
 	csvPath := os.Getenv("BENCH_CSV_PATH")
 
+	collector, err := bench.NewMetricsCollectorFromEnv()
+	if err != nil {
+		b.Logf("WARNING: could not create metrics collector: %v", err)
+	}
+	defer func() {
+		if collector != nil {
+			if cerr := collector.Close(); cerr != nil {
+				b.Logf("WARNING: metrics collector close: %v", cerr)
+			}
+		}
+	}()
+
 	tiers := []int{1, 2, 4, 8, 16}
 	var results []bench.Stats
 
@@ -93,6 +114,7 @@ func BenchmarkYugabyteStoreLoad(b *testing.B) {
 				NumWorkers: workers,
 				Duration:   duration,
 				Backend:    "yugabyte",
+				Collector:  collector,
 			})
 			b.ReportMetric(stats.OpsPerSec, "ops/s")
 			b.ReportMetric(float64(stats.LatencyP99.Microseconds()), "p99_us")

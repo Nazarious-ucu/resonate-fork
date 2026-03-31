@@ -1,0 +1,45 @@
+global:
+  scrape_interval:     5s
+  evaluation_interval: 5s
+  scrape_timeout:      4s
+  external_labels:
+    environment: "fault-tolerance-lab"
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# No alertmanager is wired up by default — alerts fire as FIRING in the
+# Prometheus UI (/alerts) which is sufficient for thesis observation.
+alerting:
+  alertmanagers: []
+
+scrape_configs:
+
+  # ── Resonate server ──────────────────────────────────────────────────────────
+  # Scrapes the built-in Prometheus endpoint exposed by the Resonate HTTP server.
+  # Container name resonate-ft, internal port 9090 (not published to the host).
+  - job_name: resonate
+    static_configs:
+      - targets: ['resonate-ft:9090']
+        labels:
+          service: resonate-server
+
+  # ── Fault-tolerance test runner ──────────────────────────────────────────────
+  # The Go test process starts a /metrics server on :9092 (METRICS_ADDR env var).
+  # It runs on the HOST, so we reach it via host.docker.internal.
+  - job_name: fault_tests
+    scrape_interval: 2s   # fine-grained — test phases are short
+    static_configs:
+      - targets: ['host.docker.internal:9092']
+        labels:
+          service: fault-test-runner
+
+  # ── Pushgateway ──────────────────────────────────────────────────────────────
+  # Receives metrics pushed by short-lived test runs (total duration < 60 s).
+  # honor_labels=true preserves the job/instance labels set by the pusher.
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ['pushgateway:9091']
+        labels:
+          service: pushgateway

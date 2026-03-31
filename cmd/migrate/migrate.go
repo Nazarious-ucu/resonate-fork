@@ -14,6 +14,7 @@ import (
 	internalUtil "github.com/resonatehq/resonate/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/yugabyte/pgx/v5/stdlib"
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
@@ -242,9 +243,8 @@ func getMigrationStore(cfg *config.Config) (migrations.MigrationStore, error) {
 			if err != nil {
 				return nil, err
 			}
-			// TO-DO: Probably write new Yagubyte Migration Store
 			store := subsystem.(*yugabyte.YugabyteStore)
-			return migrations.NewPostgresMigrationStore(store.DB()), nil
+			return migrations.NewPostgresMigrationStore(stdlib.OpenDBFromPool(store.DB())), nil
 		}
 	}
 

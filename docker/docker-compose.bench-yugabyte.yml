@@ -129,9 +129,13 @@ services:
       TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_USERNAME: yugabyte
       TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PASSWORD: yugabyte
       TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_DATABASE: resonate
-      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_LOAD_BALANCE: "false"
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_LOAD_BALANCE: "true"
       # Set BENCH_TARGET=load to run the sustained load test instead.
       BENCH_TARGET: ${BENCH_TARGET:-micro}
+      # Set BENCH_BATCH_SIZE to control how many AIO submissions are batched
+      # into a single DB transaction. Higher values amortize Raft overhead.
+      # Default 1 matches the original behaviour; try 50 or 100 for throughput.
+      BENCH_BATCH_SIZE: 1000
       BENCH_LOAD_DURATION: ${BENCH_LOAD_DURATION:-60s}
       BENCH_CSV_PATH: ${BENCH_CSV_PATH:-/results/load.csv}
     entrypoint: ["/bin/sh", "-c"]

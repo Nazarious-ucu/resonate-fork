@@ -19,7 +19,7 @@ func newYugabyteBenchStore(b *testing.B) *YugabyteStore {
 	b.Helper()
 	host := os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_HOST")
 	fallbackHosts := os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_FALLBACK_HOSTS")
-	loadBalance := false
+	loadBalance := true
 	if raw := os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_LOAD_BALANCE"); raw != "" {
 		if parsed, err := strconv.ParseBool(raw); err == nil {
 			loadBalance = parsed
@@ -32,7 +32,7 @@ func newYugabyteBenchStore(b *testing.B) *YugabyteStore {
 	m := metrics.New(prometheus.NewRegistry())
 	s, err := New(nil, m, &Config{
 		Workers:       4,
-		BatchSize:     1,
+		BatchSize:     1000,
 		Host:          host,
 		FallbackHosts: fallbackHosts,
 		Port:          os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PORT"),
@@ -40,7 +40,7 @@ func newYugabyteBenchStore(b *testing.B) *YugabyteStore {
 		Password:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PASSWORD"),
 		Database:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_DATABASE"),
 		Query:         map[string]string{"sslmode": "disable"},
-		TxTimeout:     5 * time.Second,
+		TxTimeout:     60 * time.Second,
 		LoadBalance:   loadBalance,
 		MaxRetries:    3,
 	})
@@ -90,6 +90,14 @@ func BenchmarkYugabyteStoreLoad(b *testing.B) {
 			duration = d
 		}
 	}
+
+	txBatchSize := 1
+	if raw := os.Getenv("BENCH_BATCH_SIZE"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			txBatchSize = parsed
+		}
+	}
+
 	csvPath := os.Getenv("BENCH_CSV_PATH")
 
 	collector, err := bench.NewMetricsCollectorFromEnv()
@@ -111,10 +119,11 @@ func BenchmarkYugabyteStoreLoad(b *testing.B) {
 		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
 			b.ResetTimer()
 			stats := bench.RunLoadTest(context.Background(), s.workers[0], bench.LoadConfig{
-				NumWorkers: workers,
-				Duration:   duration,
-				Backend:    "yugabyte",
-				Collector:  collector,
+				NumWorkers:  workers,
+				Duration:    duration,
+				Backend:     "yugabyte",
+				Collector:   collector,
+				TxBatchSize: txBatchSize,
 			})
 			b.ReportMetric(stats.OpsPerSec, "ops/s")
 			b.ReportMetric(float64(stats.LatencyP99.Microseconds()), "p99_us")

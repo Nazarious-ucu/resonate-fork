@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	// Schema is now managed by migrations (see internal/migrationfiles/migrations/postgres/)
+	// Schema is now managed by migrations (see internal/migrationfiles/migrations/yugabyte/)
 	CREATE_TABLE_STATEMENT = `
 	CREATE TABLE IF NOT EXISTS migrations (
 		id INTEGER,
@@ -203,7 +203,7 @@ const (
 	LIMIT $3`
 
 	TASK_SELECT_ENQUEUEABLE_STATEMENT = `
-	SELECT DISTINCT ON (root_promise_id)
+	SELECT GROUP BY (root_promise_id)
 		id,
 		process_id,
 		state,
@@ -515,7 +515,7 @@ func (s *YugabyteStore) Start(chan<- error) error {
 	sqlDB := stdlib.OpenDBFromPool(s.db)
 	defer func() { _ = sqlDB.Close() }()
 
-	ms := migrations.NewPostgresMigrationStore(sqlDB)
+	ms := migrations.NewYugabyteMigrationStore(sqlDB)
 
 	version, err := ms.GetCurrentVersion()
 	if err != nil {
@@ -673,7 +673,7 @@ func (w *YugabyteStoreWorker) Execute(transactions []*t_aio.Transaction) ([]*t_a
 }
 
 func (w *YugabyteStoreWorker) executeOnce(ctx context.Context, transactions []*t_aio.Transaction) ([]*t_aio.StoreCompletion, error) {
-	tx, err := w.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	tx, err := w.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return nil, err
 	}

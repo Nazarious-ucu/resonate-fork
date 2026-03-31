@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed migrations/sqlite migrations/postgres
+//go:embed migrations/sqlite migrations/postgres migrations/yugabyte
 var MigrationsFS embed.FS
 
 func GetMigrationFiles(dir string) ([]string, error) {

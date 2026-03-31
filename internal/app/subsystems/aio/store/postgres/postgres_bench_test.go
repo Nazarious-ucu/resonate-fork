@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func newPostgresBenchStore(b *testing.B) *PostgresStore {
 	m := metrics.New(prometheus.NewRegistry())
 	s, err := New(nil, m, &Config{
 		Workers:   4,
-		BatchSize: 1,
+		BatchSize: 1000,
 		Host:      host,
 		Port:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_PORT"),
 		Username:  os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_POSTGRES_CONFIG_USERNAME"),
@@ -79,6 +80,14 @@ func BenchmarkPostgresStoreLoad(b *testing.B) {
 			duration = d
 		}
 	}
+
+	txBatchSize := 1
+	if raw := os.Getenv("BENCH_BATCH_SIZE"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			txBatchSize = parsed
+		}
+	}
+
 	csvPath := os.Getenv("BENCH_CSV_PATH")
 
 	collector, err := bench.NewMetricsCollectorFromEnv()
@@ -101,10 +110,11 @@ func BenchmarkPostgresStoreLoad(b *testing.B) {
 			// b.N is ignored for load tests; we run for fixed Duration.
 			b.ResetTimer()
 			stats := bench.RunLoadTest(context.Background(), s.workers[0], bench.LoadConfig{
-				NumWorkers: workers,
-				Duration:   duration,
-				Backend:    "postgres",
-				Collector:  collector,
+				NumWorkers:  workers,
+				Duration:    duration,
+				Backend:     "postgres",
+				Collector:   collector,
+				TxBatchSize: txBatchSize,
 			})
 			b.ReportMetric(stats.OpsPerSec, "ops/s")
 			b.ReportMetric(float64(stats.LatencyP99.Microseconds()), "p99_us")

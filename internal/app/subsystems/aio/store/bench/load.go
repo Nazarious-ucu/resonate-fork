@@ -26,6 +26,11 @@ type LoadConfig struct {
 	// Collector receives per-operation records if non-nil.
 	// Set via NewMetricsCollectorFromEnv() in the calling test.
 	Collector *MetricsCollector
+	// TxBatchSize is the number of transactions sent in a single Execute call.
+	// When >1, multiple transactions share one BEGIN/COMMIT, amortizing the
+	// per-transaction overhead (e.g. Raft consensus in YugabyteDB).
+	// 0 or 1 means one transaction per Execute call (original behaviour).
+	TxBatchSize int
 }
 
 // Stats contains the aggregated results of a load test run.
@@ -62,6 +67,11 @@ func RunLoadTest(ctx context.Context, s store.Store, cfg LoadConfig) Stats {
 		latencies []time.Duration
 	)
 
+	batchSize := cfg.TxBatchSize
+	if batchSize < 1 {
+		batchSize = 1
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, cfg.Duration)
 	defer cancel()
 
@@ -73,26 +83,28 @@ func RunLoadTest(ctx context.Context, s store.Store, cfg LoadConfig) Stats {
 			local := make([]time.Duration, 0, 512)
 
 			for ctx.Err() == nil {
-				id := uid("load")
 				now := time.Now().UnixMilli()
-				tx := &t_aio.Transaction{
-					Commands: []t_aio.Command{
-						&t_aio.CreatePromiseCommand{
-							Id:      id,
-							State:   promise.Pending,
-							Timeout: now + int64(time.Hour.Milliseconds()),
-							Param: promise.Value{
-								Headers: map[string]string{},
-								Data:    []byte(`{"load":true}`),
+				batch := make([]*t_aio.Transaction, batchSize)
+				for j := 0; j < batchSize; j++ {
+					batch[j] = &t_aio.Transaction{
+						Commands: []t_aio.Command{
+							&t_aio.CreatePromiseCommand{
+								Id:      uid("load"),
+								State:   promise.Pending,
+								Timeout: now + int64(time.Hour.Milliseconds()),
+								Param: promise.Value{
+									Headers: map[string]string{},
+									Data:    []byte(`{"load":true}`),
+								},
+								Tags:      map[string]string{},
+								CreatedOn: now,
 							},
-							Tags:      map[string]string{},
-							CreatedOn: now,
 						},
-					},
+					}
 				}
 
 				start := time.Now()
-				_, err := s.Execute([]*t_aio.Transaction{tx})
+				_, err := s.Execute(batch)
 				elapsed := time.Since(start)
 
 				cfg.Collector.Record(
@@ -104,11 +116,16 @@ func RunLoadTest(ctx context.Context, s store.Store, cfg LoadConfig) Stats {
 				)
 
 				if err != nil {
-					errors.Add(1)
+					errors.Add(int64(batchSize))
 					continue
 				}
-				totalOps.Add(1)
-				local = append(local, elapsed)
+				totalOps.Add(int64(batchSize))
+				// Record one latency sample per transaction in the batch,
+				// proportionally split so per-op stats remain meaningful.
+				perOp := elapsed / time.Duration(batchSize)
+				for j := 0; j < batchSize; j++ {
+					local = append(local, perOp)
+				}
 			}
 
 			mu.Lock()

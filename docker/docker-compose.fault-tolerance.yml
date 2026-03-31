@@ -146,16 +146,8 @@ services:
       - resonate
       - --aio-store-yugabyte-query
       - sslmode=disable
-      # load-balance=false: use pgx's native multi-host failover instead of the
-      # YugaByte smart driver.  With load-balance=true the smart driver uses a
-      # single shared goroutine + unbuffered channel for topology refresh; when
-      # the primary node dies that goroutine blocks for CONTROL_CONN_TIMEOUT
-      # (15s hardcoded) and strips our fallback hosts, causing 100% failure for
-      # the entire downtime window.  With load-balance=false, pgx tries each
-      # host in the DSN in turn — yb-node1 fails fast (ECONNREFUSED), pgx
-      # immediately retries yb-node2 or yb-node3.
       - --aio-store-yugabyte-load-balance
-      - "false"
+      - "true"
       - --aio-store-yugabyte-workers
       - "4"
     ports:

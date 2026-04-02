@@ -24,15 +24,55 @@ scrape_configs:
         labels:
           service: resonate-server
 
-  # ── Fault-tolerance test runner ──────────────────────────────────────────────
-  # The Go test process starts a /metrics server on :9092 (METRICS_ADDR env var).
-  # It runs on the HOST, so we reach it via host.docker.internal.
+  # ── HTTP-level fault-tolerance test runner ───────────────────────────────────
+  # The Go test process (benchmarks/) starts a /metrics server on :9092.
+  # Metrics prefix: resonate_ft_*
   - job_name: fault_tests
     scrape_interval: 2s   # fine-grained — test phases are short
     static_configs:
       - targets: ['host.docker.internal:9092']
         labels:
           service: fault-test-runner
+
+  # ── Direct-store fault-tolerance test runner ──────────────────────────────────
+  # The Go test process (internal/.../yugabyte/) starts a /metrics server on :9093.
+  # Metrics prefix: resonate_store_ft_*
+  # Enabled when STORE_FAULT_TEST_ENABLED=true.
+  - job_name: store_fault_tests
+    scrape_interval: 2s
+    static_configs:
+      - targets: ['host.docker.internal:9093']
+        labels:
+          service: store-fault-test-runner
+
+  # ── YugaByte TServer metrics ─────────────────────────────────────────────────
+  # Each TServer exposes /prometheus-metrics on port 9000.
+  # We keep only the metrics relevant to fault-tolerance observation.
+  - job_name: yb_tserver
+    metrics_path: /prometheus-metrics
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['yb-node1:9000', 'yb-node2:9000', 'yb-node3:9000']
+        labels:
+          service: yb-tserver
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "handler_latency_yb_tserver_TabletServerService_(Read|Write|ListTablets)|rpc_connections_alive|rpc_inbound_calls_created|rpcs_timed_out_in_queue|rpcs_queue_overflow|tablet_raft_term|follower_lag_ms|failed_elections|not_leader_rejections|leader_memory_pressure_rejections|tablets_num_running|tablets_num_not_running|rocksdb_bytes_written|rocksdb_bytes_read|rocksdb_block_cache_hit|rocksdb_block_cache_miss|log_bytes_logged|log_cache_disk_reads"
+        action: keep
+
+  # ── YugaByte Master metrics ───────────────────────────────────────────────────
+  # Masters expose /prometheus-metrics on port 7000.
+  - job_name: yb_master
+    metrics_path: /prometheus-metrics
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['yb-node1:7000', 'yb-node2:7000', 'yb-node3:7000']
+        labels:
+          service: yb-master
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "handler_latency_yb_master_MasterService.*|tablet_servers_registered|tablet_servers_live|total_tablet_servers|tablet_leaders|total_tablets|under_replicated_tablets|over_replicated_tablets|tablets_in_wrong_placement|leader_memory_pressure_rejections|rpc_connections_alive|rpc_inbound_calls_created"
+        action: keep
 
   # ── Pushgateway ──────────────────────────────────────────────────────────────
   # Receives metrics pushed by short-lived test runs (total duration < 60 s).

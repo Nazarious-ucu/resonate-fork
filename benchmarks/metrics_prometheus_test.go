@@ -180,10 +180,16 @@ func pushToGateway(gwURL string) error {
 
 // ── TestMain helper ──────────────────────────────────────────────────────────
 
-// initPrometheus starts the metrics server, verifies the endpoint, and launches
-// a background goroutine that pushes metrics to the Pushgateway every second.
-// Returns the running HTTP server and a stop function for the push loop.
-// Failures are non-fatal: the caller should log a warning and continue.
+// initPrometheus starts the metrics server and verifies the /metrics endpoint.
+//
+// Live observability is provided by Prometheus scraping :9092 directly
+// (the fault_tests job, 2 s interval).  No periodic Pushgateway push is
+// started here — that would duplicate every counter in Prometheus while
+// both sources are scraped simultaneously.  A single final push is made in
+// finalizePrometheus once :9092 has been shut down, so post-run values are
+// preserved in the Pushgateway for later review.
+//
+// Failures are non-fatal: the caller logs a warning and continues.
 func initPrometheus() (*http.Server, func()) {
 	addr := envOr("METRICS_ADDR", defaultMetricsAddr)
 	srv, err := startMetricsServer(addr)
@@ -198,26 +204,7 @@ func initPrometheus() (*http.Server, func()) {
 	}
 
 	fmt.Printf("metrics server ready → http://127.0.0.1%s/metrics\n", addr)
-
-	gwURL := envOr("PUSHGATEWAY_URL", defaultPushGWURL)
-	stopCh := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := pushToGateway(gwURL); err != nil {
-					fmt.Fprintf(os.Stderr, "WARNING: Pushgateway push failed: %v\n", err)
-				}
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-
-	stop := func() { close(stopCh) }
-	return srv, stop
+	return srv, func() {}
 }
 
 // finalizePrometheus stops the periodic push loop, does a final push, and

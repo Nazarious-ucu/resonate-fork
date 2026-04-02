@@ -149,8 +149,20 @@ func waitForClusterBalanced(t *testing.T) {
 			"get_is_load_balancer_idle",
 		).Output()
 		if err == nil && strings.Contains(string(out), "Idle") {
-			t.Logf("load balancer idle (elapsed %s)", time.Since(start).Round(time.Second))
-			break
+			// Confirm idle a second time after 5s: the first "Idle" can be a
+			// false positive when the rejoined node hasn't yet queued its tablet
+			// redistribution work with the master.
+			time.Sleep(5 * time.Second)
+			out2, err2 := exec.Command("docker", "exec", "yb-node1",
+				"bin/yb-admin", "-master_addresses", masters,
+				"get_is_load_balancer_idle",
+			).Output()
+			if err2 == nil && strings.Contains(string(out2), "Idle") {
+				t.Logf("load balancer idle (elapsed %s)", time.Since(start).Round(time.Second))
+				break
+			}
+			// Not confirmed — keep polling.
+			continue
 		}
 		time.Sleep(5 * time.Second)
 	}

@@ -20,6 +20,15 @@ type Metrics struct {
 	PromisesTotal        *prometheus.CounterVec
 	SchedulesTotal       *prometheus.CounterVec
 	TasksTotal           *prometheus.CounterVec
+
+	// YugaByte-specific metrics for fault-tolerance monitoring
+	YugabyteTxTotal       *prometheus.CounterVec
+	YugabyteTxRetries     prometheus.Counter
+	YugabyteTxDuration    prometheus.Histogram
+	YugabytePoolConns     *prometheus.GaugeVec
+	YugabyteErrorsTotal   *prometheus.CounterVec
+	YugabyteCommandTotal  *prometheus.CounterVec
+	YugabyteBatchDuration *prometheus.HistogramVec
 }
 
 func New(reg prometheus.Registerer) *Metrics {
@@ -96,6 +105,38 @@ func New(reg prometheus.Registerer) *Metrics {
 			Name: "tasks_total",
 			Help: "count of tasks",
 		}, []string{"state"}),
+
+		// YugaByte-specific metrics for fault-tolerance monitoring
+		YugabyteTxTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "yugabyte_tx_total",
+			Help: "total number of YugaByte transactions by final status",
+		}, []string{"status"}),
+		YugabyteTxRetries: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "yugabyte_tx_retries_total",
+			Help: "total number of YugaByte transaction retry attempts (serialization/deadlock errors)",
+		}),
+		YugabyteTxDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "yugabyte_tx_duration_seconds",
+			Help:    "duration of YugaByte transactions in seconds",
+			Buckets: prometheus.DefBuckets,
+		}),
+		YugabytePoolConns: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "yugabyte_pool_connections",
+			Help: "YugaByte connection pool connection counts by state",
+		}, []string{"state"}),
+		YugabyteErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "yugabyte_errors_total",
+			Help: "total number of errors received from YugaByte by error type",
+		}, []string{"error_type"}),
+		YugabyteCommandTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "yugabyte_command_total",
+			Help: "total number of store commands queued to YugaByte by command type",
+		}, []string{"command"}),
+		YugabyteBatchDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "yugabyte_batch_duration_seconds",
+			Help:    "round-trip latency of a YugaByte batch per dominant command type (SendBatch → all results received)",
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5},
+		}, []string{"command"}),
 	}
 
 	metrics.Enable(reg)
@@ -120,6 +161,13 @@ func (m *Metrics) Enable(reg prometheus.Registerer) {
 	reg.MustRegister(m.PromisesTotal)
 	reg.MustRegister(m.SchedulesTotal)
 	reg.MustRegister(m.TasksTotal)
+	reg.MustRegister(m.YugabyteTxTotal)
+	reg.MustRegister(m.YugabyteTxRetries)
+	reg.MustRegister(m.YugabyteTxDuration)
+	reg.MustRegister(m.YugabytePoolConns)
+	reg.MustRegister(m.YugabyteErrorsTotal)
+	reg.MustRegister(m.YugabyteCommandTotal)
+	reg.MustRegister(m.YugabyteBatchDuration)
 }
 
 func (m *Metrics) Disable(reg prometheus.Registerer) {
@@ -140,4 +188,11 @@ func (m *Metrics) Disable(reg prometheus.Registerer) {
 	reg.Unregister(m.PromisesTotal)
 	reg.Unregister(m.SchedulesTotal)
 	reg.Unregister(m.TasksTotal)
+	reg.Unregister(m.YugabyteTxTotal)
+	reg.Unregister(m.YugabyteTxRetries)
+	reg.Unregister(m.YugabyteTxDuration)
+	reg.Unregister(m.YugabytePoolConns)
+	reg.Unregister(m.YugabyteErrorsTotal)
+	reg.Unregister(m.YugabyteCommandTotal)
+	reg.Unregister(m.YugabyteBatchDuration)
 }

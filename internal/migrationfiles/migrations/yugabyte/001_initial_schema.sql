@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS promises (
                                         created_on                   BIGINT,
                                         completed_on                 BIGINT,
                                         PRIMARY KEY(id)
-) SPLIT INTO 3 TABLETS;
+);
 
 CREATE INDEX IF NOT EXISTS idx_promises_sort_id ON promises(sort_id);
 

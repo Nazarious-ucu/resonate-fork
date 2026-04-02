@@ -1,6 +1,6 @@
 module github.com/resonatehq/resonate
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/anishathalye/porcupine v1.0.3
@@ -10,6 +10,7 @@ require (
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
+	github.com/jackc/pgx/v5 v5.9.1
 	github.com/lib/pq v1.10.9
 	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/mitchellh/mapstructure v1.5.0

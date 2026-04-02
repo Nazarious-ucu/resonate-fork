@@ -21,7 +21,7 @@
         "pluginId": "prometheus",
         "label": "Datasource",
         "hide": 0,
-        "current": {}
+        "current": { "selected": true, "text": "Prometheus", "value": "prometheus" }
       }
     ]
   },
@@ -32,7 +32,7 @@
       "title": "HTTP Request Rate",
       "type": "stat",
       "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "reduceOptions": { "calcs": ["mean"] },
         "colorMode": "value",
@@ -45,7 +45,7 @@
             "steps": [{ "color": "blue", "value": null }] } }
       },
       "targets": [{
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
         "expr": "sum(rate(http_requests_total[1m]))",
         "legendFormat": "req/s",
         "refId": "A"
@@ -57,7 +57,7 @@
       "title": "HTTP 5xx Error Rate",
       "type": "stat",
       "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "reduceOptions": { "calcs": ["mean"] },
         "colorMode": "background",
@@ -73,7 +73,7 @@
             ] } }
       },
       "targets": [{
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
         "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
         "legendFormat": "5xx rate",
         "refId": "A"
@@ -85,7 +85,7 @@
       "title": "HTTP p99 Latency",
       "type": "stat",
       "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
         "colorMode": "background",
@@ -101,7 +101,7 @@
             ] } }
       },
       "targets": [{
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
         "expr": "histogram_quantile(0.99, sum(rate(http_requests_duration_seconds_bucket[2m])) by (le))",
         "legendFormat": "p99",
         "refId": "A"
@@ -113,7 +113,7 @@
       "title": "Resonate Server Up",
       "type": "stat",
       "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "reduceOptions": { "calcs": ["lastNotNull"] },
         "colorMode": "background",
@@ -134,7 +134,7 @@
         }
       },
       "targets": [{
-        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
         "expr": "up{job=\"resonate\"}",
         "legendFormat": "resonate",
         "refId": "A"
@@ -146,7 +146,7 @@
       "title": "HTTP Request Rate by Path",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max"] }
@@ -161,7 +161,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(rate(http_requests_total[$__rate_interval])) by (method, path, status)",
           "legendFormat": "{{method}} {{path}} {{status}}",
           "refId": "A"
@@ -174,7 +174,7 @@
       "title": "HTTP Latency Percentiles by Path",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max"] }
@@ -189,13 +189,13 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.99, sum(rate(http_requests_duration_seconds_bucket[$__rate_interval])) by (le, path))",
           "legendFormat": "p99 {{path}}",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.50, sum(rate(http_requests_duration_seconds_bucket[$__rate_interval])) by (le, path))",
           "legendFormat": "p50 {{path}}",
           "refId": "B"
@@ -208,7 +208,7 @@
       "title": "AIO Store Submission Rate",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max"] }
@@ -223,7 +223,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(rate(aio_submissions_total[$__rate_interval])) by (type, status)",
           "legendFormat": "{{type}} / {{status}}",
           "refId": "A"
@@ -236,7 +236,7 @@
       "title": "AIO In-Flight Submissions",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max","last"] }
@@ -251,13 +251,13 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "aio_submissions_in_flight",
           "legendFormat": "{{type}}",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "aio_worker_submissions_in_flight",
           "legendFormat": "worker {{worker}} / {{type}}",
           "refId": "B"
@@ -270,7 +270,7 @@
       "title": "AIO Store Duration",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max"] }
@@ -285,13 +285,13 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.99, sum(rate(aio_duration_seconds_bucket[$__rate_interval])) by (le, type))",
           "legendFormat": "p99 {{type}}",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "histogram_quantile(0.50, sum(rate(aio_duration_seconds_bucket[$__rate_interval])) by (le, type))",
           "legendFormat": "p50 {{type}}",
           "refId": "B"
@@ -304,7 +304,7 @@
       "title": "Coroutines In-Flight",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max","last"] }
@@ -319,7 +319,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "coroutines_in_flight",
           "legendFormat": "{{type}}",
           "refId": "A"
@@ -332,7 +332,7 @@
       "title": "Promise State Transitions",
       "type": "timeseries",
       "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","sum"] }
@@ -347,7 +347,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(rate(promises_total[$__rate_interval])) by (state)",
           "legendFormat": "{{state}}",
           "refId": "A"
@@ -360,7 +360,7 @@
       "title": "Task State Transitions",
       "type": "timeseries",
       "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
       "options": {
         "tooltip": { "mode": "multi", "sort": "desc" },
         "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","sum"] }
@@ -375,7 +375,7 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum(rate(tasks_total[$__rate_interval])) by (state)",
           "legendFormat": "{{state}}",
           "refId": "A"

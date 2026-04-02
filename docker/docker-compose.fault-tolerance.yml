@@ -66,6 +66,11 @@ services:
       - --cloud_location=cloud.region.zone2
       - --fault_tolerance=zone
       - --master_flags=load_balancer_initial_delay_secs=0
+    ports:
+      # Exposed on 5434 so store fault-tolerance tests can reach this node
+      # directly from the host when testing primary-node kill scenarios.
+      # YB_FT_HOSTS=localhost:5433,localhost:5434,localhost:5435
+      - "5434:5433"
     depends_on:
       yb-node1:
         condition: service_healthy
@@ -82,6 +87,9 @@ services:
       - --cloud_location=cloud.region.zone3
       - --fault_tolerance=zone
       - --master_flags=load_balancer_initial_delay_secs=0
+    ports:
+      # Exposed on 5435 for the same reason as yb-node2 above.
+      - "5435:5433"
     depends_on:
       yb-node1:
         condition: service_healthy

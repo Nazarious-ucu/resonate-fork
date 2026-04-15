@@ -39,3 +39,4 @@ api/index.html
 /benchmarks/comparison*
 /benchmarks/charts/
 /docker/grafana/dashboards/fault_tolerance.json
+internal/app/subsystems/aio/store/yugabyte/results*

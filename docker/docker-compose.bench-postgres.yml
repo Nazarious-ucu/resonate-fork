@@ -46,7 +46,7 @@ services:
         -c fsync=on
 
   bench-runner:
-    image: golang:1.24-alpine
+    image: golang:1.25-alpine
     container_name: postgres-bench-runner
     volumes:
       - ..:/workspace:ro

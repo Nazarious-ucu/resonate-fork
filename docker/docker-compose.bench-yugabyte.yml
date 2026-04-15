@@ -108,6 +108,43 @@ services:
           "SELECT 'exists' FROM pg_database WHERE datname='resonate'" \
           | grep -q exists \
           || ysqlsh -h yb-node1 -U yugabyte -c "CREATE DATABASE resonate"
+        echo "Pre-creating tables with SPLIT INTO 3 TABLETS..."
+        split_sql='
+        CREATE TABLE IF NOT EXISTS promises (
+            id                           TEXT,
+            sort_id                      SERIAL,
+            state                        INTEGER DEFAULT 1,
+            param_headers                JSONB,
+            param_data                   BYTEA,
+            value_headers                JSONB,
+            value_data                   BYTEA,
+            timeout                      BIGINT,
+            idempotency_key_for_create   TEXT,
+            idempotency_key_for_complete TEXT,
+            tags                         JSONB,
+            created_on                   BIGINT,
+            completed_on                 BIGINT,
+            PRIMARY KEY(id)
+        ) SPLIT INTO 3 TABLETS;
+        CREATE TABLE IF NOT EXISTS tasks (
+            id              TEXT,
+            sort_id         SERIAL,
+            process_id      TEXT,
+            state           INTEGER DEFAULT 1,
+            root_promise_id TEXT,
+            recv            BYTEA,
+            mesg            BYTEA,
+            timeout         BIGINT,
+            counter         INTEGER DEFAULT 1,
+            attempt         INTEGER DEFAULT 0,
+            ttl             BIGINT DEFAULT 0,
+            expires_at      BIGINT DEFAULT 0,
+            created_on      BIGINT,
+            completed_on    BIGINT,
+            PRIMARY KEY(id)
+        ) SPLIT INTO 3 TABLETS;
+        '
+        echo "$$split_sql" | ysqlsh -h yb-node1 -U yugabyte -d resonate
         echo "YugabyteDB bench cluster ready."
     restart: "no"
 
@@ -116,7 +153,7 @@ services:
   # The source tree is mounted read-only; results are written to benchmarks/results/.
 
   bench-runner:
-    image: golang:1.24-alpine
+    image: golang:1.25-alpine
     container_name: yb-bench-runner
     volumes:
       - ..:/workspace:ro

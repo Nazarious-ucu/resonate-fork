@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/rand" // nosemgrep
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
@@ -203,7 +206,7 @@ const (
 	LIMIT $3`
 
 	TASK_SELECT_ENQUEUEABLE_STATEMENT = `
-	SELECT GROUP BY (root_promise_id)
+	SELECT DISTINCT ON (root_promise_id)
 		id,
 		process_id,
 		state,
@@ -287,7 +290,7 @@ type Config struct {
 	MaxIdleConns      int               `flag:"max-idle-conns" desc:"maximum number of idle database connections (0 defaults to workers)" default:"0"`
 	ConnMaxIdleTime   time.Duration     `flag:"conn-max-idle-time" desc:"maximum amount of time a connection may be idle" default:"10s"`
 	ConnMaxLifetime   time.Duration     `flag:"conn-max-lifetime" desc:"maximum amount of time a connection may be reused" default:"30s"`
-	HealthCheckPeriod time.Duration     `flag:"health-check-period" desc:"how often pgxpool pings idle connections to detect failures" default:"5s"`
+	HealthCheckPeriod time.Duration     `flag:"health-check-period" desc:"how often pgxpool pings idle connections to detect failures" default:"2s"`
 	Host              string            `flag:"host" desc:"yugabyte host" default:"localhost"`
 	FallbackHosts     string            `flag:"fallback-hosts" desc:"comma-separated additional hosts for multi-node failover (e.g. yb-node2,yb-node3)" default:""`
 	Port              string            `flag:"port" desc:"yugabyte YSQL port" default:"5433"`
@@ -416,6 +419,18 @@ func NewConn(ctx context.Context, config *ConnConfig) (*pgxpool.Pool, error) {
 		return conn.Ping(ctx) == nil, nil
 	}
 
+	// Enable OS-level TCP keepalives so the kernel detects dead YugaByte nodes
+	// within ~5 s instead of never. DSN-based libpq params (keepalives_idle etc.)
+	// are not recognized by YugaByte YSQL (SQLSTATE 42704), so we set them here
+	// via a custom dialer instead.
+	poolConfig.ConnConfig.Config.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		d := &net.Dialer{
+			KeepAlive: 3 * time.Second,
+			Timeout:   1 * time.Second,
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+
 	return pgxpool.NewWithConfig(ctx, poolConfig)
 }
 
@@ -438,13 +453,10 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 		query["yb_servers_refresh_interval"] = strconv.Itoa(config.RefreshInterval)
 	}
 	// Limit how long a single connection attempt to a dead node can block.
-	// Without this, when a YugaByte node disappears mid-graceful-shutdown the
-	// TCP SYN or in-flight query can hang until the OS TCP timeout fires (>60s),
-	// causing Resonate's HTTP handlers to time out and return network errors to
-	// callers.  2 seconds is enough for the smart driver to detect failure and
-	// the pool to open a replacement connection to a live node.
+	// connect_timeout: cap how long a TCP SYN to a dead node can block.
+	// Lowered to 1s so the smart driver routes to a live node faster.
 	if _, set := query["connect_timeout"]; !set {
-		query["connect_timeout"] = "2"
+		query["connect_timeout"] = "1"
 	}
 
 	maxOpenConns := config.MaxOpenConns
@@ -643,33 +655,55 @@ func (w *YugabyteStoreWorker) Process(sqes []*bus.SQE[t_aio.Submission, t_aio.Co
 }
 
 func (w *YugabyteStoreWorker) Execute(transactions []*t_aio.Transaction) ([]*t_aio.StoreCompletion, error) {
+	start := time.Now()
+
 	ctx, cancel := context.WithTimeout(context.Background(), w.config.TxTimeout)
 	defer cancel()
 
 	var lastErr error
 	for attempt := 0; attempt <= w.config.MaxRetries; attempt++ {
 		if attempt > 0 {
+			w.metrics.YugabyteTxRetries.Inc()
 			backoff := time.Duration(1<<uint(attempt-1)) * 10 * time.Millisecond
 			slog.Warn("retrying transaction", "attempt", attempt, "backoff", backoff, "err", lastErr)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
+				w.metrics.YugabyteErrorsTotal.WithLabelValues(classifyError(ctx.Err())).Inc()
+				w.metrics.YugabyteTxTotal.WithLabelValues("failed").Inc()
+				w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
 				return nil, fmt.Errorf("tx retry cancelled: %w (last error: %v)", ctx.Err(), lastErr)
 			}
 		}
 
 		results, err := w.executeOnce(ctx, transactions)
 		if err == nil {
+			w.metrics.YugabyteTxTotal.WithLabelValues("ok").Inc()
+			w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
+			w.updatePoolStats()
 			return results, nil
 		}
 		lastErr = err
+		w.metrics.YugabyteErrorsTotal.WithLabelValues(classifyError(err)).Inc()
 
 		if !isRetryableError(err) {
+			w.metrics.YugabyteTxTotal.WithLabelValues("failed").Inc()
+			w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
 			return nil, err
 		}
 	}
 
+	w.metrics.YugabyteTxTotal.WithLabelValues("failed").Inc()
+	w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
 	return nil, fmt.Errorf("tx failed after %d retries: %w", w.config.MaxRetries, lastErr)
+}
+
+func (w *YugabyteStoreWorker) updatePoolStats() {
+	stat := w.db.Stat()
+	w.metrics.YugabytePoolConns.WithLabelValues("acquired").Set(float64(stat.AcquiredConns()))
+	w.metrics.YugabytePoolConns.WithLabelValues("idle").Set(float64(stat.IdleConns()))
+	w.metrics.YugabytePoolConns.WithLabelValues("total").Set(float64(stat.TotalConns()))
+	w.metrics.YugabytePoolConns.WithLabelValues("constructing").Set(float64(stat.ConstructingConns()))
 }
 
 func (w *YugabyteStoreWorker) executeOnce(ctx context.Context, transactions []*t_aio.Transaction) ([]*t_aio.StoreCompletion, error) {
@@ -690,6 +724,17 @@ func (w *YugabyteStoreWorker) executeOnce(ctx context.Context, transactions []*t
 }
 
 func isRetryableError(err error) bool {
+	// Network-level errors: the connection to a YugaByte node died before or
+	// during the transaction (hard kill, ECONNRESET, EOF).  The smart driver
+	// will route the next attempt to a live node, so retrying is safe.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
@@ -708,151 +753,255 @@ func isRetryableError(err error) bool {
 	return false
 }
 
+// classifyError maps a YugaByte/pgx error to a human-readable label for Prometheus.
+func classifyError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline_exceeded"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "40001":
+			return "serialization_failure"
+		case "40P01":
+			return "deadlock_detected"
+		case "XX000":
+			return "raft_leader_election"
+		case "08006":
+			return "connection_failure"
+		case "57P01":
+			return "admin_shutdown"
+		case "08001":
+			return "connection_rejected"
+		case "08004":
+			return "connection_rejected_sqlclient"
+		case "23505":
+			return "unique_violation"
+		case "23503":
+			return "foreign_key_violation"
+		default:
+			return "pg_" + pgErr.Code
+		}
+	}
+
+	// Network-level errors — happen before a PgError is ever assigned.
+	// These are the dominant error type during a YugaByte node kill.
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "connection_eof"
+	}
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		if errors.Is(netErr.Err, syscall.ECONNRESET) {
+			return "connection_reset"
+		}
+		if errors.Is(netErr.Err, syscall.ECONNREFUSED) {
+			return "connection_refused"
+		}
+		return "net_op_error"
+	}
+
+	return "unknown"
+}
+
 func (w *YugabyteStoreWorker) performCommands(ctx context.Context, tx pgx.Tx, transactions []*t_aio.Transaction) ([]*t_aio.StoreCompletion, error) {
 	completions := make([]*t_aio.StoreCompletion, len(transactions))
+	var batch pgx.Batch
+	cmdCounts := map[string]int{}
+	trackCmd := func(name string) {
+		w.metrics.YugabyteCommandTotal.WithLabelValues(name).Inc()
+		cmdCounts[name]++
+	}
 
 	for i, transaction := range transactions {
 		util.Assert(len(transaction.Commands) > 0, "expected a command")
 
-		valid, err := w.validFencingToken(ctx, tx, transaction)
-		if err != nil {
-			return nil, err
-		}
-
-		if !valid {
-			completions[i] = &t_aio.StoreCompletion{
-				Valid: false,
-			}
-			continue
-		}
 		results := make([]t_aio.Result, len(transaction.Commands))
+		completions[i] = &t_aio.StoreCompletion{Valid: true, Results: results}
 
-		completions[i] = &t_aio.StoreCompletion{
-			Valid:   true,
-			Results: results,
+		// fenceFailed is set to true by the fencing callback when the token is
+		// invalid; all subsequent command callbacks for this transaction check it
+		// and short-circuit so that their results[j] slots are left nil.
+		fenceFailed := false
+
+		if transaction.Fence != nil {
+			capturedI := i
+			flagPtr := &fenceFailed
+			qq := batch.Queue(TASK_VALIDATE_STATEMENT, transaction.Fence.TaskId, transaction.Fence.TaskCounter)
+			qq.QueryRow(func(row pgx.Row) error {
+				var rowCount int64
+				if err := row.Scan(&rowCount); err != nil {
+					return store.StoreErr(err)
+				}
+				util.Assert(rowCount == 1 || rowCount == 0, "must be zero or one")
+				if rowCount != 1 {
+					*flagPtr = true
+					completions[capturedI] = &t_aio.StoreCompletion{Valid: false}
+				}
+				return nil
+			})
 		}
 
 		for j, command := range transaction.Commands {
-			var err error
+			flagPtr := &fenceFailed
 
 			switch v := command.(type) {
 			// Promises
 			case *t_aio.ReadPromiseCommand:
-				results[j], err = w.readPromise(ctx, tx, v)
+				trackCmd("read_promise")
+				w.readPromise(&batch, results, j, flagPtr, v)
+
 			case *t_aio.ReadPromisesCommand:
-				results[j], err = w.readPromises(ctx, tx, v)
+				trackCmd("read_promises")
+				w.readPromises(&batch, results, j, flagPtr, v)
+
 			case *t_aio.SearchPromisesCommand:
-				results[j], err = w.searchPromises(ctx, tx, v)
+				trackCmd("search_promises")
+				if err := w.searchPromises(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
+
 			case *t_aio.CreatePromiseCommand:
-				results[j], err = w.createPromise(ctx, tx, v)
+				trackCmd("create_promise")
+				if err := w.createPromise(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
+
 			case *t_aio.UpdatePromiseCommand:
-				results[j], err = w.updatePromise(ctx, tx, v)
+				trackCmd("update_promise")
+				if err := w.updatePromise(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
 
 			// Callbacks
 			case *t_aio.CreateCallbackCommand:
-				results[j], err = w.createCallback(ctx, tx, v)
+				trackCmd("create_callback")
+				if err := w.createCallback(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
+
 			case *t_aio.DeleteCallbacksCommand:
-				results[j], err = w.deleteCallbacks(ctx, tx, v)
+				trackCmd("delete_callbacks")
+				w.deleteCallbacks(&batch, results, j, flagPtr, v)
 
 			// Schedules
 			case *t_aio.ReadScheduleCommand:
-				results[j], err = w.readSchedule(ctx, tx, v)
+				trackCmd("read_schedule")
+				w.readSchedule(&batch, results, j, flagPtr, v)
+
 			case *t_aio.ReadSchedulesCommand:
-				results[j], err = w.readSchedules(ctx, tx, v)
+				trackCmd("read_schedules")
+				w.readSchedules(&batch, results, j, flagPtr, v)
+
 			case *t_aio.SearchSchedulesCommand:
-				results[j], err = w.searchSchedules(ctx, tx, v)
+				trackCmd("search_schedules")
+				if err := w.searchSchedules(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
+
 			case *t_aio.CreateScheduleCommand:
-				results[j], err = w.createSchedule(ctx, tx, v)
+				trackCmd("create_schedule")
+				if err := w.createSchedule(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
+
 			case *t_aio.UpdateScheduleCommand:
-				results[j], err = w.updateSchedule(ctx, tx, v)
+				trackCmd("update_schedule")
+				w.updateSchedule(&batch, results, j, flagPtr, v)
+
 			case *t_aio.DeleteScheduleCommand:
-				results[j], err = w.deleteSchedule(ctx, tx, v)
+				trackCmd("delete_schedule")
+				w.deleteSchedule(&batch, results, j, flagPtr, v)
 
 			// Tasks
 			case *t_aio.ReadTaskCommand:
-				results[j], err = w.readTask(ctx, tx, v)
+				trackCmd("read_task")
+				w.readTask(&batch, results, j, flagPtr, v)
+
 			case *t_aio.ReadTasksCommand:
-				results[j], err = w.readTasks(ctx, tx, v)
+				trackCmd("read_tasks")
+				w.readTasks(&batch, results, j, flagPtr, v)
+
 			case *t_aio.ReadEnqueueableTasksCommand:
-				results[j], err = w.readEnqueueableTasks(ctx, tx, v)
+				trackCmd("read_enqueueable_tasks")
+				w.readEnqueueableTasks(&batch, results, j, flagPtr, v)
+
 			case *t_aio.CreateTaskCommand:
-				results[j], err = w.createTask(ctx, tx, v)
+				trackCmd("create_task")
+				if err := w.createTask(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
+
 			case *t_aio.CreateTasksCommand:
-				results[j], err = w.createTasks(ctx, tx, v)
+				trackCmd("create_tasks")
+				w.createTasks(&batch, results, j, flagPtr, v)
+
 			case *t_aio.UpdateTaskCommand:
-				results[j], err = w.updateTask(ctx, tx, v)
+				trackCmd("update_task")
+				w.updateTask(&batch, results, j, flagPtr, v)
+
 			case *t_aio.CompleteTasksCommand:
-				results[j], err = w.completeTasks(ctx, tx, v)
+				trackCmd("complete_tasks")
+				w.completeTasks(&batch, results, j, flagPtr, v)
+
 			case *t_aio.HeartbeatTasksCommand:
-				results[j], err = w.heartbeatTasks(ctx, tx, v)
+				trackCmd("heartbeat_tasks")
+				w.heartbeatTasks(&batch, results, j, flagPtr, v)
 
 			case *t_aio.CreatePromiseAndTaskCommand:
-				results[j], err = w.createPromiseAndTask(ctx, tx, v)
+				trackCmd("create_promise_and_task")
+				if err := w.createPromiseAndTask(&batch, results, j, flagPtr, v); err != nil {
+					return nil, err
+				}
 
 			default:
 				panic(fmt.Sprintf("invalid command: %s", command.String()))
 			}
-
-			if err != nil {
-				return nil, err
-			}
 		}
 	}
 
-	return completions, nil
+	if batch.Len() == 0 {
+		return completions, nil
+	}
+
+	dominant := dominantCommand(cmdCounts)
+	batchStart := time.Now()
+	br := tx.SendBatch(ctx, &batch)
+	err := br.Close()
+	w.metrics.YugabyteBatchDuration.WithLabelValues(dominant).Observe(time.Since(batchStart).Seconds())
+	return completions, err
+}
+
+// dominantCommand returns the command type that appeared most often in the batch.
+// When multiple types tie, the winner is arbitrary but consistent within a call.
+func dominantCommand(counts map[string]int) string {
+	best, maxN := "mixed", 0
+	for cmd, n := range counts {
+		if n > maxN {
+			best, maxN = cmd, n
+		}
+	}
+	return best
 }
 
 // Promises
 
-func (w *YugabyteStoreWorker) readPromise(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadPromiseCommand) (*t_aio.QueryPromisesResult, error) {
-	row := tx.QueryRow(ctx, PROMISE_SELECT_STATEMENT, cmd.Id)
-	record := &promise.PromiseRecord{}
-	rowsReturned := int64(1)
-
-	if err := row.Scan(
-		&record.Id,
-		&record.State,
-		&record.ParamHeaders,
-		&record.ParamData,
-		&record.ValueHeaders,
-		&record.ValueData,
-		&record.Timeout,
-		&record.Tags,
-		&record.CreatedOn,
-		&record.CompletedOn,
-	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			rowsReturned = 0
-		} else {
-			return nil, err
+func (w *YugabyteStoreWorker) readPromise(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadPromiseCommand) {
+	qq := batch.Queue(PROMISE_SELECT_STATEMENT, cmd.Id)
+	qq.QueryRow(func(row pgx.Row) error {
+		if *flagPtr {
+			return nil
 		}
-	}
-
-	var records []*promise.PromiseRecord
-	if rowsReturned == 1 {
-		records = append(records, record)
-	}
-
-	return &t_aio.QueryPromisesResult{
-		RowsReturned: rowsReturned,
-		Records:      records,
-	}, nil
-}
-
-func (w *YugabyteStoreWorker) readPromises(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadPromisesCommand) (*t_aio.QueryPromisesResult, error) {
-	rows, err := tx.Query(ctx, PROMISE_SELECT_ALL_STATEMENT, cmd.Time, cmd.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	rowsReturned := int64(0)
-	var records []*promise.PromiseRecord
-	var lastSortId int64
-
-	for rows.Next() {
 		record := &promise.PromiseRecord{}
-		if err := rows.Scan(
+		rowsReturned := int64(1)
+		if err := row.Scan(
 			&record.Id,
 			&record.State,
 			&record.ParamHeaders,
@@ -863,98 +1012,122 @@ func (w *YugabyteStoreWorker) readPromises(ctx context.Context, tx pgx.Tx, cmd *
 			&record.Tags,
 			&record.CreatedOn,
 			&record.CompletedOn,
-			&record.SortId,
 		); err != nil {
-			return nil, err
+			if errors.Is(err, pgx.ErrNoRows) {
+				rowsReturned = 0
+			} else {
+				return err
+			}
 		}
-
-		records = append(records, record)
-		lastSortId = record.SortId
-		rowsReturned++
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &t_aio.QueryPromisesResult{
-		RowsReturned: rowsReturned,
-		LastSortId:   lastSortId,
-		Records:      records,
-	}, nil
+		var records []*promise.PromiseRecord
+		if rowsReturned == 1 {
+			records = append(records, record)
+		}
+		results[j] = &t_aio.QueryPromisesResult{
+			RowsReturned: rowsReturned,
+			Records:      records,
+		}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) searchPromises(ctx context.Context, tx pgx.Tx, cmd *t_aio.SearchPromisesCommand) (*t_aio.QueryPromisesResult, error) {
+func (w *YugabyteStoreWorker) readPromises(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadPromisesCommand) {
+	qq := batch.Queue(PROMISE_SELECT_ALL_STATEMENT, cmd.Time, cmd.Limit)
+	qq.Query(func(rows pgx.Rows) error {
+		if *flagPtr {
+			return nil
+		}
+		rowsReturned := int64(0)
+		var records []*promise.PromiseRecord
+		var lastSortId int64
+		for rows.Next() {
+			record := &promise.PromiseRecord{}
+			if err := rows.Scan(
+				&record.Id,
+				&record.State,
+				&record.ParamHeaders,
+				&record.ParamData,
+				&record.ValueHeaders,
+				&record.ValueData,
+				&record.Timeout,
+				&record.Tags,
+				&record.CreatedOn,
+				&record.CompletedOn,
+				&record.SortId,
+			); err != nil {
+				return err
+			}
+			records = append(records, record)
+			lastSortId = record.SortId
+			rowsReturned++
+		}
+		results[j] = &t_aio.QueryPromisesResult{
+			RowsReturned: rowsReturned,
+			LastSortId:   lastSortId,
+			Records:      records,
+		}
+		return nil
+	})
+}
+
+func (w *YugabyteStoreWorker) searchPromises(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.SearchPromisesCommand) error {
 	util.Assert(cmd.Id != "", "query cannot be empty")
 	util.Assert(cmd.States != nil, "states cannot be empty")
 	util.Assert(cmd.Tags != nil, "tags cannot be empty")
 
-	// convert query
 	id := strings.ReplaceAll(cmd.Id, "*", "%")
-
-	// convert list of state to bit mask
 	mask := 0
 	for _, state := range cmd.States {
 		mask = mask | int(state)
 	}
-
-	// tags
 	var tags *string
-
 	if len(cmd.Tags) > 0 {
 		t, err := json.Marshal(cmd.Tags)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
 		tags = util.ToPointer(string(t))
 	}
-
-	rows, err := tx.Query(ctx, PROMISE_SEARCH_STATEMENT, cmd.SortId, id, mask, tags, cmd.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	rowsReturned := int64(0)
-	var records []*promise.PromiseRecord
-	var lastSortId int64
-
-	for rows.Next() {
-		record := &promise.PromiseRecord{}
-		if err := rows.Scan(
-			&record.Id,
-			&record.State,
-			&record.ParamHeaders,
-			&record.ParamData,
-			&record.ValueHeaders,
-			&record.ValueData,
-			&record.Timeout,
-			&record.Tags,
-			&record.CreatedOn,
-			&record.CompletedOn,
-			&record.SortId,
-		); err != nil {
-			return nil, err
+	qq := batch.Queue(PROMISE_SEARCH_STATEMENT, cmd.SortId, id, mask, tags, cmd.Limit)
+	qq.Query(func(rows pgx.Rows) error {
+		if *flagPtr {
+			return nil
 		}
-
-		records = append(records, record)
-		lastSortId = record.SortId
-		rowsReturned++
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &t_aio.QueryPromisesResult{
-		RowsReturned: rowsReturned,
-		LastSortId:   lastSortId,
-		Records:      records,
-	}, nil
+		rowsReturned := int64(0)
+		var records []*promise.PromiseRecord
+		var lastSortId int64
+		for rows.Next() {
+			record := &promise.PromiseRecord{}
+			if err := rows.Scan(
+				&record.Id,
+				&record.State,
+				&record.ParamHeaders,
+				&record.ParamData,
+				&record.ValueHeaders,
+				&record.ValueData,
+				&record.Timeout,
+				&record.Tags,
+				&record.CreatedOn,
+				&record.CompletedOn,
+				&record.SortId,
+			); err != nil {
+				return err
+			}
+			records = append(records, record)
+			lastSortId = record.SortId
+			rowsReturned++
+		}
+		results[j] = &t_aio.QueryPromisesResult{
+			RowsReturned: rowsReturned,
+			LastSortId:   lastSortId,
+			Records:      records,
+		}
+		return nil
+	})
+	return nil
 }
 
-func (w *YugabyteStoreWorker) createPromise(ctx context.Context, tx pgx.Tx, cmd *t_aio.CreatePromiseCommand) (*t_aio.AlterPromisesResult, error) {
+func (w *YugabyteStoreWorker) createPromise(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CreatePromiseCommand) error {
 	util.Assert(cmd.State.In(promise.Pending|promise.Resolved|promise.Timedout), "init state must be one of pending, resolved, timedout")
 	util.Assert(cmd.Param.Headers != nil, "param headers must not be nil")
 	util.Assert(cmd.Param.Data != nil, "param data must not be nil")
@@ -962,145 +1135,90 @@ func (w *YugabyteStoreWorker) createPromise(ctx context.Context, tx pgx.Tx, cmd 
 
 	headers, err := json.Marshal(cmd.Param.Headers)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
 	tags, err := json.Marshal(cmd.Tags)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	tag, err := tx.Exec(ctx, PROMISE_INSERT_STATEMENT, cmd.Id, cmd.State, headers, cmd.Param.Data, cmd.Timeout, cmd.Id, tags, cmd.CreatedOn)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterPromisesResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
-}
-
-func (w *YugabyteStoreWorker) createPromiseAndTask(ctx context.Context, tx pgx.Tx, cmd *t_aio.CreatePromiseAndTaskCommand) (*t_aio.AlterPromisesResult, error) {
-	res, err := w.createPromise(ctx, tx, cmd.PromiseCommand)
-	if err != nil {
-		return nil, err
-	}
-
-	if res.RowsAffected == 1 {
-		if _, err := w.createTask(ctx, tx, cmd.TaskCommand); err != nil {
-			return nil, err
+	qq := batch.Queue(PROMISE_INSERT_STATEMENT, cmd.Id, cmd.State, headers, cmd.Param.Data, cmd.Timeout, cmd.Id, tags, cmd.CreatedOn)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
 		}
-	}
-
-	return res, nil
+		results[j] = &t_aio.AlterPromisesResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
+	return nil
 }
 
-func (w *YugabyteStoreWorker) updatePromise(ctx context.Context, tx pgx.Tx, cmd *t_aio.UpdatePromiseCommand) (*t_aio.AlterPromisesResult, error) {
+func (w *YugabyteStoreWorker) updatePromise(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.UpdatePromiseCommand) error {
 	util.Assert(cmd.State.In(promise.Resolved|promise.Rejected|promise.Canceled|promise.Timedout), "state must be canceled, resolved, rejected, or timedout")
 	util.Assert(cmd.Value.Headers != nil, "value headers must not be nil")
 	util.Assert(cmd.Value.Data != nil, "value data must not be nil")
 
 	headers, err := json.Marshal(cmd.Value.Headers)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	tag, err := tx.Exec(ctx, PROMISE_UPDATE_STATEMENT, cmd.State, headers, cmd.Value.Data, cmd.Id, cmd.CompletedOn, cmd.Id)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterPromisesResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+	qq := batch.Queue(PROMISE_UPDATE_STATEMENT, cmd.State, headers, cmd.Value.Data, cmd.Id, cmd.CompletedOn, cmd.Id)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterPromisesResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
+	return nil
 }
 
 // Callbacks
 
-func (w *YugabyteStoreWorker) createCallback(ctx context.Context, tx pgx.Tx, cmd *t_aio.CreateCallbackCommand) (*t_aio.AlterCallbacksResult, error) {
+func (w *YugabyteStoreWorker) createCallback(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CreateCallbackCommand) error {
 	util.Assert(cmd.Recv != nil, "recv must not be nil")
 	util.Assert(cmd.Mesg != nil, "mesg must not be nil")
 
 	mesg, err := json.Marshal(cmd.Mesg)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	tag, err := tx.Exec(ctx, CALLBACK_INSERT_STATEMENT, cmd.Id, cmd.PromiseId, cmd.Mesg.Root, cmd.Recv, mesg, cmd.Timeout, cmd.CreatedOn)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterCallbacksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+	qq := batch.Queue(CALLBACK_INSERT_STATEMENT, cmd.Id, cmd.PromiseId, cmd.Mesg.Root, cmd.Recv, mesg, cmd.Timeout, cmd.CreatedOn)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterCallbacksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
+	return nil
 }
 
-func (w *YugabyteStoreWorker) deleteCallbacks(ctx context.Context, tx pgx.Tx, cmd *t_aio.DeleteCallbacksCommand) (*t_aio.AlterCallbacksResult, error) {
-	tag, err := tx.Exec(ctx, CALLBACK_DELETE_STATEMENT, cmd.PromiseId)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterCallbacksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+func (w *YugabyteStoreWorker) deleteCallbacks(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.DeleteCallbacksCommand) {
+	qq := batch.Queue(CALLBACK_DELETE_STATEMENT, cmd.PromiseId)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterCallbacksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
 }
 
 // Schedules
 
-func (w *YugabyteStoreWorker) readSchedule(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadScheduleCommand) (*t_aio.QuerySchedulesResult, error) {
-	row := tx.QueryRow(ctx, SCHEDULE_SELECT_STATEMENT, cmd.Id)
-	record := &schedule.ScheduleRecord{}
-	rowsReturned := int64(1)
-
-	if err := row.Scan(
-		&record.Id,
-		&record.Description,
-		&record.Cron,
-		&record.Tags,
-		&record.PromiseId,
-		&record.PromiseTimeout,
-		&record.PromiseParamHeaders,
-		&record.PromiseParamData,
-		&record.PromiseTags,
-		&record.LastRunTime,
-		&record.NextRunTime,
-		&record.CreatedOn,
-	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			rowsReturned = 0
-		} else {
-			return nil, err
+func (w *YugabyteStoreWorker) readSchedule(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadScheduleCommand) {
+	qq := batch.Queue(SCHEDULE_SELECT_STATEMENT, cmd.Id)
+	qq.QueryRow(func(row pgx.Row) error {
+		if *flagPtr {
+			return nil
 		}
-	}
-
-	var records []*schedule.ScheduleRecord
-	if rowsReturned == 1 {
-		records = append(records, record)
-	}
-
-	return &t_aio.QuerySchedulesResult{
-		RowsReturned: rowsReturned,
-		Records:      records,
-	}, nil
-}
-
-func (w *YugabyteStoreWorker) readSchedules(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadSchedulesCommand) (*t_aio.QuerySchedulesResult, error) {
-	rows, err := tx.Query(ctx, SCHEDULE_SELECT_ALL_STATEMENT, cmd.NextRunTime, cmd.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	rowsReturned := int64(0)
-	var records []*schedule.ScheduleRecord
-
-	for rows.Next() {
 		record := &schedule.ScheduleRecord{}
-		if err := rows.Scan(
+		rowsReturned := int64(1)
+		if err := row.Scan(
 			&record.Id,
+			&record.Description,
 			&record.Cron,
+			&record.Tags,
 			&record.PromiseId,
 			&record.PromiseTimeout,
 			&record.PromiseParamHeaders,
@@ -1108,279 +1226,284 @@ func (w *YugabyteStoreWorker) readSchedules(ctx context.Context, tx pgx.Tx, cmd 
 			&record.PromiseTags,
 			&record.LastRunTime,
 			&record.NextRunTime,
+			&record.CreatedOn,
 		); err != nil {
-			return nil, err
+			if errors.Is(err, pgx.ErrNoRows) {
+				rowsReturned = 0
+			} else {
+				return err
+			}
 		}
-
-		records = append(records, record)
-		rowsReturned++
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &t_aio.QuerySchedulesResult{
-		RowsReturned: rowsReturned,
-		Records:      records,
-	}, nil
+		var records []*schedule.ScheduleRecord
+		if rowsReturned == 1 {
+			records = append(records, record)
+		}
+		results[j] = &t_aio.QuerySchedulesResult{
+			RowsReturned: rowsReturned,
+			Records:      records,
+		}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) searchSchedules(ctx context.Context, tx pgx.Tx, cmd *t_aio.SearchSchedulesCommand) (*t_aio.QuerySchedulesResult, error) {
+func (w *YugabyteStoreWorker) readSchedules(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadSchedulesCommand) {
+	qq := batch.Queue(SCHEDULE_SELECT_ALL_STATEMENT, cmd.NextRunTime, cmd.Limit)
+	qq.Query(func(rows pgx.Rows) error {
+		if *flagPtr {
+			return nil
+		}
+		rowsReturned := int64(0)
+		var records []*schedule.ScheduleRecord
+		for rows.Next() {
+			record := &schedule.ScheduleRecord{}
+			if err := rows.Scan(
+				&record.Id,
+				&record.Cron,
+				&record.PromiseId,
+				&record.PromiseTimeout,
+				&record.PromiseParamHeaders,
+				&record.PromiseParamData,
+				&record.PromiseTags,
+				&record.LastRunTime,
+				&record.NextRunTime,
+			); err != nil {
+				return err
+			}
+			records = append(records, record)
+			rowsReturned++
+		}
+		results[j] = &t_aio.QuerySchedulesResult{
+			RowsReturned: rowsReturned,
+			Records:      records,
+		}
+		return nil
+	})
+}
+
+func (w *YugabyteStoreWorker) searchSchedules(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.SearchSchedulesCommand) error {
 	util.Assert(cmd.Id != "", "query cannot be empty")
 	util.Assert(cmd.Tags != nil, "tags cannot be empty")
 
-	// convert query
 	id := strings.ReplaceAll(cmd.Id, "*", "%")
-
-	// tags
 	var tags *string
 	if len(cmd.Tags) > 0 {
 		t, err := json.Marshal(cmd.Tags)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
 		tags = util.ToPointer(string(t))
 	}
-
-	rows, err := tx.Query(ctx, SCHEDULE_SEARCH_STATEMENT, cmd.SortId, id, tags, cmd.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	rowsReturned := int64(0)
-	var records []*schedule.ScheduleRecord
-	var lastSortId int64
-
-	for rows.Next() {
-		record := &schedule.ScheduleRecord{}
-		if err := rows.Scan(
-			&record.Id,
-			&record.Cron,
-			&record.Tags,
-			&record.LastRunTime,
-			&record.NextRunTime,
-			&record.CreatedOn,
-			&record.SortId,
-		); err != nil {
-			return nil, err
+	qq := batch.Queue(SCHEDULE_SEARCH_STATEMENT, cmd.SortId, id, tags, cmd.Limit)
+	qq.Query(func(rows pgx.Rows) error {
+		if *flagPtr {
+			return nil
 		}
-
-		records = append(records, record)
-		lastSortId = record.SortId
-		rowsReturned++
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &t_aio.QuerySchedulesResult{
-		RowsReturned: rowsReturned,
-		LastSortId:   lastSortId,
-		Records:      records,
-	}, nil
+		rowsReturned := int64(0)
+		var records []*schedule.ScheduleRecord
+		var lastSortId int64
+		for rows.Next() {
+			record := &schedule.ScheduleRecord{}
+			if err := rows.Scan(
+				&record.Id,
+				&record.Cron,
+				&record.Tags,
+				&record.LastRunTime,
+				&record.NextRunTime,
+				&record.CreatedOn,
+				&record.SortId,
+			); err != nil {
+				return err
+			}
+			records = append(records, record)
+			lastSortId = record.SortId
+			rowsReturned++
+		}
+		results[j] = &t_aio.QuerySchedulesResult{
+			RowsReturned: rowsReturned,
+			LastSortId:   lastSortId,
+			Records:      records,
+		}
+		return nil
+	})
+	return nil
 }
 
-func (w *YugabyteStoreWorker) createSchedule(ctx context.Context, tx pgx.Tx, cmd *t_aio.CreateScheduleCommand) (*t_aio.AlterSchedulesResult, error) {
+func (w *YugabyteStoreWorker) createSchedule(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CreateScheduleCommand) error {
 	tags, err := json.Marshal(cmd.Tags)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
 	promiseParamHeaders, err := json.Marshal(cmd.PromiseParam.Headers)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
 	promiseTags, err := json.Marshal(cmd.PromiseTags)
 	if err != nil {
-		return nil, err
+		return err
 	}
-
-	tag, err := tx.Exec(ctx, SCHEDULE_INSERT_STATEMENT,
-		cmd.Id,
-		cmd.Description,
-		cmd.Cron,
-		tags,
-		cmd.PromiseId,
-		cmd.PromiseTimeout,
-		promiseParamHeaders,
-		cmd.PromiseParam.Data,
-		promiseTags,
-		cmd.NextRunTime,
-		cmd.Id,
-		cmd.CreatedOn,
+	qq := batch.Queue(SCHEDULE_INSERT_STATEMENT,
+		cmd.Id, cmd.Description, cmd.Cron, tags,
+		cmd.PromiseId, cmd.PromiseTimeout, promiseParamHeaders, cmd.PromiseParam.Data, promiseTags,
+		cmd.NextRunTime, cmd.Id, cmd.CreatedOn,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterSchedulesResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterSchedulesResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
+	return nil
 }
 
-func (w *YugabyteStoreWorker) updateSchedule(ctx context.Context, tx pgx.Tx, cmd *t_aio.UpdateScheduleCommand) (*t_aio.AlterSchedulesResult, error) {
-	tag, err := tx.Exec(ctx, SCHEDULE_UPDATE_STATEMENT, cmd.NextRunTime, cmd.Id, cmd.LastRunTime)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterSchedulesResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+func (w *YugabyteStoreWorker) updateSchedule(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.UpdateScheduleCommand) {
+	qq := batch.Queue(SCHEDULE_UPDATE_STATEMENT, cmd.NextRunTime, cmd.Id, cmd.LastRunTime)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterSchedulesResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) deleteSchedule(ctx context.Context, tx pgx.Tx, cmd *t_aio.DeleteScheduleCommand) (*t_aio.AlterSchedulesResult, error) {
-	tag, err := tx.Exec(ctx, SCHEDULE_DELETE_STATEMENT, cmd.Id)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterSchedulesResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+func (w *YugabyteStoreWorker) deleteSchedule(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.DeleteScheduleCommand) {
+	qq := batch.Queue(SCHEDULE_DELETE_STATEMENT, cmd.Id)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterSchedulesResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
 }
 
 // Tasks
 
-func (w *YugabyteStoreWorker) readTask(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadTaskCommand) (*t_aio.QueryTasksResult, error) {
-	row := tx.QueryRow(ctx, TASK_SELECT_STATEMENT, cmd.Id)
-	record := &task.TaskRecord{}
-	rowsReturned := int64(1)
-
-	if err := row.Scan(
-		&record.Id,
-		&record.ProcessId,
-		&record.State,
-		&record.RootPromiseId,
-		&record.Recv,
-		&record.Mesg,
-		&record.Timeout,
-		&record.Counter,
-		&record.Attempt,
-		&record.Ttl,
-		&record.ExpiresAt,
-		&record.CreatedOn,
-		&record.CompletedOn,
-	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			rowsReturned = 0
-		} else {
-			return nil, store.StoreErr(err)
+func (w *YugabyteStoreWorker) readTask(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadTaskCommand) {
+	qq := batch.Queue(TASK_SELECT_STATEMENT, cmd.Id)
+	qq.QueryRow(func(row pgx.Row) error {
+		if *flagPtr {
+			return nil
 		}
-	}
-
-	var records []*task.TaskRecord
-	if rowsReturned == 1 {
-		records = append(records, record)
-	}
-
-	return &t_aio.QueryTasksResult{
-		RowsReturned: rowsReturned,
-		Records:      records,
-	}, nil
+		record := &task.TaskRecord{}
+		rowsReturned := int64(1)
+		if err := row.Scan(
+			&record.Id,
+			&record.ProcessId,
+			&record.State,
+			&record.RootPromiseId,
+			&record.Recv,
+			&record.Mesg,
+			&record.Timeout,
+			&record.Counter,
+			&record.Attempt,
+			&record.Ttl,
+			&record.ExpiresAt,
+			&record.CreatedOn,
+			&record.CompletedOn,
+		); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				rowsReturned = 0
+			} else {
+				return store.StoreErr(err)
+			}
+		}
+		var records []*task.TaskRecord
+		if rowsReturned == 1 {
+			records = append(records, record)
+		}
+		results[j] = &t_aio.QueryTasksResult{
+			RowsReturned: rowsReturned,
+			Records:      records,
+		}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) readTasks(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadTasksCommand) (*t_aio.QueryTasksResult, error) {
+func (w *YugabyteStoreWorker) readTasks(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadTasksCommand) {
 	util.Assert(len(cmd.States) > 0, "must provide at least one state")
 
 	var states task.State
 	for _, state := range cmd.States {
 		states |= state
 	}
-
-	rows, err := tx.Query(ctx, TASK_SELECT_ALL_STATEMENT, states, cmd.Time, cmd.Limit)
-	if err != nil {
-		return nil, store.StoreErr(err)
-	}
-	defer rows.Close()
-
-	rowsReturned := int64(0)
-	var records []*task.TaskRecord
-
-	for rows.Next() {
-		record := &task.TaskRecord{}
-		if err := rows.Scan(
-			&record.Id,
-			&record.ProcessId,
-			&record.State,
-			&record.RootPromiseId,
-			&record.Recv,
-			&record.Mesg,
-			&record.Timeout,
-			&record.Counter,
-			&record.Attempt,
-			&record.Ttl,
-			&record.ExpiresAt,
-			&record.CreatedOn,
-			&record.CompletedOn,
-		); err != nil {
-			return nil, store.StoreErr(err)
+	qq := batch.Queue(TASK_SELECT_ALL_STATEMENT, states, cmd.Time, cmd.Limit)
+	qq.Query(func(rows pgx.Rows) error {
+		if *flagPtr {
+			return nil
 		}
-
-		records = append(records, record)
-		rowsReturned++
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, store.StoreErr(err)
-	}
-
-	return &t_aio.QueryTasksResult{
-		RowsReturned: rowsReturned,
-		Records:      records,
-	}, nil
+		rowsReturned := int64(0)
+		var records []*task.TaskRecord
+		for rows.Next() {
+			record := &task.TaskRecord{}
+			if err := rows.Scan(
+				&record.Id,
+				&record.ProcessId,
+				&record.State,
+				&record.RootPromiseId,
+				&record.Recv,
+				&record.Mesg,
+				&record.Timeout,
+				&record.Counter,
+				&record.Attempt,
+				&record.Ttl,
+				&record.ExpiresAt,
+				&record.CreatedOn,
+				&record.CompletedOn,
+			); err != nil {
+				return store.StoreErr(err)
+			}
+			records = append(records, record)
+			rowsReturned++
+		}
+		results[j] = &t_aio.QueryTasksResult{
+			RowsReturned: rowsReturned,
+			Records:      records,
+		}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) readEnqueueableTasks(ctx context.Context, tx pgx.Tx, cmd *t_aio.ReadEnqueueableTasksCommand) (*t_aio.QueryTasksResult, error) {
-	rows, err := tx.Query(ctx, TASK_SELECT_ENQUEUEABLE_STATEMENT, cmd.Time, cmd.Limit)
-	if err != nil {
-		return nil, store.StoreErr(err)
-	}
-	defer rows.Close()
-
-	rowsReturned := int64(0)
-	var records []*task.TaskRecord
-
-	for rows.Next() {
-		record := &task.TaskRecord{}
-		if err := rows.Scan(
-			&record.Id,
-			&record.ProcessId,
-			&record.State,
-			&record.RootPromiseId,
-			&record.Recv,
-			&record.Mesg,
-			&record.Timeout,
-			&record.Counter,
-			&record.Attempt,
-			&record.Ttl,
-			&record.ExpiresAt,
-			&record.CreatedOn,
-			&record.CompletedOn,
-		); err != nil {
-			return nil, store.StoreErr(err)
+func (w *YugabyteStoreWorker) readEnqueueableTasks(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.ReadEnqueueableTasksCommand) {
+	qq := batch.Queue(TASK_SELECT_ENQUEUEABLE_STATEMENT, cmd.Time, cmd.Limit)
+	qq.Query(func(rows pgx.Rows) error {
+		if *flagPtr {
+			return nil
 		}
-
-		records = append(records, record)
-		rowsReturned++
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, store.StoreErr(err)
-	}
-
-	return &t_aio.QueryTasksResult{
-		RowsReturned: rowsReturned,
-		Records:      records,
-	}, nil
+		rowsReturned := int64(0)
+		var records []*task.TaskRecord
+		for rows.Next() {
+			record := &task.TaskRecord{}
+			if err := rows.Scan(
+				&record.Id,
+				&record.ProcessId,
+				&record.State,
+				&record.RootPromiseId,
+				&record.Recv,
+				&record.Mesg,
+				&record.Timeout,
+				&record.Counter,
+				&record.Attempt,
+				&record.Ttl,
+				&record.ExpiresAt,
+				&record.CreatedOn,
+				&record.CompletedOn,
+			); err != nil {
+				return store.StoreErr(err)
+			}
+			records = append(records, record)
+			rowsReturned++
+		}
+		results[j] = &t_aio.QueryTasksResult{
+			RowsReturned: rowsReturned,
+			Records:      records,
+		}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) createTask(ctx context.Context, tx pgx.Tx, cmd *t_aio.CreateTaskCommand) (*t_aio.AlterTasksResult, error) {
+func (w *YugabyteStoreWorker) createTask(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CreateTaskCommand) error {
 	util.Assert(cmd.Recv != nil, "recv must not be nil")
 	util.Assert(cmd.Mesg != nil, "mesg must not be nil")
 	util.Assert(cmd.State.In(task.Init|task.Claimed), "state must be init or claimed")
@@ -1388,93 +1511,117 @@ func (w *YugabyteStoreWorker) createTask(ctx context.Context, tx pgx.Tx, cmd *t_
 
 	mesg, err := json.Marshal(cmd.Mesg)
 	if err != nil {
-		return nil, store.StoreErr(err)
+		return store.StoreErr(err)
 	}
-
-	tag, err := tx.Exec(ctx, TASK_INSERT_STATEMENT, cmd.Id, cmd.Recv, mesg, cmd.Timeout, cmd.ProcessId, cmd.State, cmd.Mesg.Root, cmd.Ttl, cmd.ExpiresAt, cmd.CreatedOn)
-	if err != nil {
-		return nil, err
-	}
-
-	return &t_aio.AlterTasksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+	qq := batch.Queue(TASK_INSERT_STATEMENT, cmd.Id, cmd.Recv, mesg, cmd.Timeout, cmd.ProcessId, cmd.State, cmd.Mesg.Root, cmd.Ttl, cmd.ExpiresAt, cmd.CreatedOn)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterTasksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
+	return nil
 }
 
-func (w *YugabyteStoreWorker) createTasks(ctx context.Context, tx pgx.Tx, cmd *t_aio.CreateTasksCommand) (*t_aio.AlterTasksResult, error) {
-	tag, err := tx.Exec(ctx, TASK_INSERT_ALL_STATEMENT, cmd.CreatedOn, cmd.PromiseId)
-	if err != nil {
-		return nil, store.StoreErr(err)
-	}
-
-	return &t_aio.AlterTasksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+func (w *YugabyteStoreWorker) createTasks(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CreateTasksCommand) {
+	qq := batch.Queue(TASK_INSERT_ALL_STATEMENT, cmd.CreatedOn, cmd.PromiseId)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterTasksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) completeTasks(ctx context.Context, tx pgx.Tx, cmd *t_aio.CompleteTasksCommand) (*t_aio.AlterTasksResult, error) {
-	tag, err := tx.Exec(ctx, TASK_COMPLETE_BY_ROOT_ID_STATEMENT, cmd.CompletedOn, cmd.RootPromiseId)
-	if err != nil {
-		return nil, store.StoreErr(err)
-	}
-
-	return &t_aio.AlterTasksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
-}
-
-func (w *YugabyteStoreWorker) updateTask(ctx context.Context, tx pgx.Tx, cmd *t_aio.UpdateTaskCommand) (*t_aio.AlterTasksResult, error) {
+func (w *YugabyteStoreWorker) updateTask(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.UpdateTaskCommand) {
 	util.Assert(len(cmd.CurrentStates) > 0, "must provide at least one current state")
 
 	var currentStates task.State
 	for _, state := range cmd.CurrentStates {
 		currentStates |= state
 	}
-
-	tag, err := tx.Exec(ctx, TASK_UPDATE_STATEMENT,
-		cmd.ProcessId,
-		cmd.State,
-		cmd.Counter,
-		cmd.Attempt,
-		cmd.Ttl,
-		cmd.ExpiresAt,
-		cmd.CompletedOn,
-		cmd.Id,
-		currentStates,
-		cmd.CurrentCounter,
+	qq := batch.Queue(TASK_UPDATE_STATEMENT,
+		cmd.ProcessId, cmd.State, cmd.Counter, cmd.Attempt, cmd.Ttl, cmd.ExpiresAt, cmd.CompletedOn,
+		cmd.Id, currentStates, cmd.CurrentCounter,
 	)
-	if err != nil {
-		return nil, store.StoreErr(err)
-	}
-
-	return &t_aio.AlterTasksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterTasksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) heartbeatTasks(ctx context.Context, tx pgx.Tx, cmd *t_aio.HeartbeatTasksCommand) (*t_aio.AlterTasksResult, error) {
-	tag, err := tx.Exec(ctx, TASK_HEARTBEAT_STATEMENT, cmd.Time, cmd.ProcessId)
-	if err != nil {
-		return nil, store.StoreErr(err)
-	}
-
-	return &t_aio.AlterTasksResult{
-		RowsAffected: tag.RowsAffected(),
-	}, nil
+func (w *YugabyteStoreWorker) completeTasks(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CompleteTasksCommand) {
+	qq := batch.Queue(TASK_COMPLETE_BY_ROOT_ID_STATEMENT, cmd.CompletedOn, cmd.RootPromiseId)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterTasksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
 }
 
-func (w *YugabyteStoreWorker) validFencingToken(ctx context.Context, tx pgx.Tx, transaction *t_aio.Transaction) (bool, error) {
-	// if the task is not provided continue with the operation
-	if transaction.Fence == nil {
-		return true, nil
-	}
+func (w *YugabyteStoreWorker) heartbeatTasks(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.HeartbeatTasksCommand) {
+	qq := batch.Queue(TASK_HEARTBEAT_STATEMENT, cmd.Time, cmd.ProcessId)
+	qq.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterTasksResult{RowsAffected: ct.RowsAffected()}
+		return nil
+	})
+}
 
-	var rowCount int64
-	err := tx.QueryRow(ctx, TASK_VALIDATE_STATEMENT, transaction.Fence.TaskId, transaction.Fence.TaskCounter).Scan(&rowCount)
+func (w *YugabyteStoreWorker) createPromiseAndTask(batch *pgx.Batch, results []t_aio.Result, j int, flagPtr *bool, cmd *t_aio.CreatePromiseAndTaskCommand) error {
+	pc := cmd.PromiseCommand
+	tc := cmd.TaskCommand
+	util.Assert(pc.State.In(promise.Pending|promise.Resolved|promise.Timedout), "init state must be one of pending, resolved, timedout")
+	util.Assert(pc.Param.Headers != nil, "param headers must not be nil")
+	util.Assert(pc.Param.Data != nil, "param data must not be nil")
+	util.Assert(pc.Tags != nil, "tags must not be nil")
+	util.Assert(tc.Recv != nil, "recv must not be nil")
+	util.Assert(tc.Mesg != nil, "mesg must not be nil")
+	util.Assert(tc.State.In(task.Init|task.Claimed), "state must be init or claimed")
+	util.Assert(tc.State != task.Claimed || tc.ProcessId != nil, "process id must be set if state is claimed")
 
+	headers, err := json.Marshal(pc.Param.Headers)
 	if err != nil {
-		return false, store.StoreErr(err)
+		return err
 	}
-	util.Assert(rowCount == 1 || rowCount == 0, "must be zero or one")
-	return rowCount == 1, nil
+	ptags, err := json.Marshal(pc.Tags)
+	if err != nil {
+		return err
+	}
+	mesg, err := json.Marshal(tc.Mesg)
+	if err != nil {
+		return err
+	}
+
+	// Both statements are always queued. TASK_INSERT_STATEMENT uses
+	// ON CONFLICT DO NOTHING so it is safe to run even when the promise
+	// insert is a no-op. The promise callback captures promiseRowsAffected
+	// which the task callback uses to build the final result.
+	var promiseRowsAffected int64
+	qq1 := batch.Queue(PROMISE_INSERT_STATEMENT, pc.Id, pc.State, headers, pc.Param.Data, pc.Timeout, pc.Id, ptags, pc.CreatedOn)
+	qq1.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		promiseRowsAffected = ct.RowsAffected()
+		return nil
+	})
+	qq2 := batch.Queue(TASK_INSERT_STATEMENT, tc.Id, tc.Recv, mesg, tc.Timeout, tc.ProcessId, tc.State, tc.Mesg.Root, tc.Ttl, tc.ExpiresAt, tc.CreatedOn)
+	qq2.Exec(func(ct pgconn.CommandTag) error {
+		if *flagPtr {
+			return nil
+		}
+		results[j] = &t_aio.AlterPromisesResult{RowsAffected: promiseRowsAffected}
+		return nil
+	})
+	return nil
 }

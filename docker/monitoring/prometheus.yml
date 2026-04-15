@@ -57,7 +57,7 @@ scrape_configs:
           service: yb-tserver
     metric_relabel_configs:
       - source_labels: [__name__]
-        regex: "handler_latency_yb_tserver_TabletServerService_(Read|Write|ListTablets)|rpc_connections_alive|rpc_inbound_calls_created|rpcs_timed_out_in_queue|rpcs_queue_overflow|tablet_raft_term|follower_lag_ms|failed_elections|not_leader_rejections|leader_memory_pressure_rejections|tablets_num_running|tablets_num_not_running|rocksdb_bytes_written|rocksdb_bytes_read|rocksdb_block_cache_hit|rocksdb_block_cache_miss|log_bytes_logged|log_cache_disk_reads"
+        regex: "handler_latency_yb_tserver_TabletServerService_(Read|Write|ListTablets).*|rpc_connections_alive|rpc_inbound_calls_created|rpcs_timed_out_in_queue|rpcs_queue_overflow|tablet_raft_term|follower_lag_ms|failed_elections|not_leader_rejections|leader_memory_pressure_rejections|tablets_num_running|tablets_num_not_running|rocksdb_bytes_written|rocksdb_bytes_read|rocksdb_block_cache_hit|rocksdb_block_cache_miss|log_bytes_logged|log_cache_disk_reads"
         action: keep
 
   # ── YugaByte Master metrics ───────────────────────────────────────────────────

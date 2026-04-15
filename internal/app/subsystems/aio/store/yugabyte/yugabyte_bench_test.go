@@ -33,6 +33,8 @@ func newYugabyteBenchStore(b *testing.B) *YugabyteStore {
 	s, err := New(nil, m, &Config{
 		Workers:       4,
 		BatchSize:     1000,
+		MaxOpenConns:  16, // match the highest goroutine tier in the load test
+		MaxIdleConns:  16,
 		Host:          host,
 		FallbackHosts: fallbackHosts,
 		Port:          os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PORT"),
@@ -40,7 +42,7 @@ func newYugabyteBenchStore(b *testing.B) *YugabyteStore {
 		Password:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PASSWORD"),
 		Database:      os.Getenv("TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_DATABASE"),
 		Query:         map[string]string{"sslmode": "disable"},
-		TxTimeout:     60 * time.Second,
+		TxTimeout:     5 * time.Second,
 		LoadBalance:   loadBalance,
 		MaxRetries:    3,
 	})

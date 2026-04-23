@@ -249,7 +249,8 @@ const (
 	WHERE
 		promise_id = $2
 	ORDER BY
-		id`
+		id
+	ON CONFLICT (id) DO NOTHING`
 
 	TASK_UPDATE_STATEMENT = `
 	UPDATE
@@ -278,6 +279,19 @@ const (
 			END
 	WHERE
 		process_id = $2 AND state = 4`
+
+	// YugabyteDB does not support DELETE ... LIMIT; use a subquery instead.
+	TASK_CLEANUP_STATEMENT = `
+	DELETE FROM tasks
+	WHERE id IN (
+		SELECT id FROM tasks WHERE state = 8 AND completed_on < $1 LIMIT 1000
+	)`
+
+	PROMISE_CLEANUP_STATEMENT = `
+	DELETE FROM promises
+	WHERE id IN (
+		SELECT id FROM promises WHERE state IN (2, 4) AND completed_on < $1 LIMIT 1000
+	)`
 )
 
 // Config
@@ -288,7 +302,7 @@ type Config struct {
 	Workers           int               `flag:"workers" desc:"number of workers" default:"1" dst:"1"`
 	MaxOpenConns      int               `flag:"max-open-conns" desc:"maximum number of open database connections (0 defaults to workers)" default:"0"`
 	MaxIdleConns      int               `flag:"max-idle-conns" desc:"maximum number of idle database connections (0 defaults to workers)" default:"0"`
-	ConnMaxIdleTime   time.Duration     `flag:"conn-max-idle-time" desc:"maximum amount of time a connection may be idle" default:"10s"`
+	ConnMaxIdleTime   time.Duration     `flag:"conn-max-idle-time" desc:"maximum amount of time a connection may be idle" default:"20s"`
 	ConnMaxLifetime   time.Duration     `flag:"conn-max-lifetime" desc:"maximum amount of time a connection may be reused" default:"30s"`
 	HealthCheckPeriod time.Duration     `flag:"health-check-period" desc:"how often pgxpool pings idle connections to detect failures" default:"2s"`
 	Host              string            `flag:"host" desc:"yugabyte host" default:"localhost"`
@@ -419,6 +433,20 @@ func NewConn(ctx context.Context, config *ConnConfig) (*pgxpool.Pool, error) {
 		return conn.Ping(ctx) == nil, nil
 	}
 
+	// Increase batch nested loop join batch size for better multi-row lookups.
+	// statement_timeout aborts queries stalled on tablet leader election server-side,
+	// independent of Go context — protects against half-open TCP connections where
+	// ctx.Done() may not interrupt the blocking syscall in time. Must be less than
+	// attemptBudget (TxTimeout / (MaxRetries+1)) so the server abort lands before
+	// the Go-side per-attempt deadline.
+	poolConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		if _, err := conn.Exec(ctx, "SET yb_bnl_batch_size = 1024"); err != nil {
+			return err
+		}
+		_, err := conn.Exec(ctx, "SET statement_timeout = '2000'")
+		return err
+	}
+
 	// Enable OS-level TCP keepalives so the kernel detects dead YugaByte nodes
 	// within ~5 s instead of never. DSN-based libpq params (keepalives_idle etc.)
 	// are not recognized by YugaByte YSQL (SQLSTATE 42704), so we set them here
@@ -499,6 +527,24 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 			metrics: metrics,
 		}
 	}
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		const retentionNs = int64(time.Hour)
+		for range ticker.C {
+			cutoff := time.Now().UnixNano() - retentionNs
+			if tag, err := db.Exec(context.Background(), TASK_CLEANUP_STATEMENT, cutoff); err != nil {
+				slog.Warn("task cleanup failed", "err", err)
+			} else {
+				slog.Info("task cleanup", "deleted", tag.RowsAffected())
+			}
+			if tag, err := db.Exec(context.Background(), PROMISE_CLEANUP_STATEMENT, cutoff); err != nil {
+				slog.Warn("promise cleanup failed", "err", err)
+			} else {
+				slog.Info("promise cleanup", "deleted", tag.RowsAffected())
+			}
+		}
+	}()
 
 	return &YugabyteStore{
 		config:  config,
@@ -657,8 +703,15 @@ func (w *YugabyteStoreWorker) Process(sqes []*bus.SQE[t_aio.Submission, t_aio.Co
 func (w *YugabyteStoreWorker) Execute(transactions []*t_aio.Transaction) ([]*t_aio.StoreCompletion, error) {
 	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), w.config.TxTimeout)
-	defer cancel()
+	// Outer context caps the total retry budget across all attempts.
+	outerCtx, outerCancel := context.WithTimeout(context.Background(), w.config.TxTimeout)
+	defer outerCancel()
+
+	// Per-attempt budget: a single tablet-leader lookup stalled on a rejoining
+	// node must not consume the entire TxTimeout. Splitting the budget ensures
+	// the next attempt (which the smart driver may route to a live node) still
+	// has time to run.
+	attemptBudget := w.config.TxTimeout / time.Duration(w.config.MaxRetries+1)
 
 	var lastErr error
 	for attempt := 0; attempt <= w.config.MaxRetries; attempt++ {
@@ -668,15 +721,17 @@ func (w *YugabyteStoreWorker) Execute(transactions []*t_aio.Transaction) ([]*t_a
 			slog.Warn("retrying transaction", "attempt", attempt, "backoff", backoff, "err", lastErr)
 			select {
 			case <-time.After(backoff):
-			case <-ctx.Done():
-				w.metrics.YugabyteErrorsTotal.WithLabelValues(classifyError(ctx.Err())).Inc()
+			case <-outerCtx.Done():
+				w.metrics.YugabyteErrorsTotal.WithLabelValues(classifyError(outerCtx.Err())).Inc()
 				w.metrics.YugabyteTxTotal.WithLabelValues("failed").Inc()
 				w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
-				return nil, fmt.Errorf("tx retry cancelled: %w (last error: %v)", ctx.Err(), lastErr)
+				return nil, fmt.Errorf("tx retry cancelled: %w (last error: %v)", outerCtx.Err(), lastErr)
 			}
 		}
 
-		results, err := w.executeOnce(ctx, transactions)
+		attemptCtx, attemptCancel := context.WithTimeout(outerCtx, attemptBudget)
+		results, err := w.executeOnce(attemptCtx, transactions)
+		attemptCancel()
 		if err == nil {
 			w.metrics.YugabyteTxTotal.WithLabelValues("ok").Inc()
 			w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
@@ -690,6 +745,10 @@ func (w *YugabyteStoreWorker) Execute(transactions []*t_aio.Transaction) ([]*t_a
 			w.metrics.YugabyteTxTotal.WithLabelValues("failed").Inc()
 			w.metrics.YugabyteTxDuration.Observe(time.Since(start).Seconds())
 			return nil, err
+		}
+
+		if outerCtx.Err() != nil {
+			break
 		}
 	}
 
@@ -724,6 +783,14 @@ func (w *YugabyteStoreWorker) executeOnce(ctx context.Context, transactions []*t
 }
 
 func isRetryableError(err error) bool {
+	// Per-attempt context deadline: the attempt-scoped timeout fired (e.g. while
+	// waiting for a tablet leader on a dead node).  The outer Execute() context
+	// still has budget, so retrying with a fresh attempt context is safe — the
+	// smart driver may route the next connection to a live node.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
 	// Network-level errors: the connection to a YugaByte node died before or
 	// during the transaction (hard kill, ECONNRESET, EOF).  The smart driver
 	// will route the next attempt to a live node, so retrying is safe.
@@ -747,6 +814,8 @@ func isRetryableError(err error) bool {
 		case "08006": // connection_failure — node went down mid-transaction
 			return true
 		case "57P01": // admin_shutdown — node restart/rolling upgrade
+			return true
+		case "57014": // query_canceled — statement_timeout fired because a tablet
 			return true
 		}
 	}
@@ -779,6 +848,8 @@ func classifyError(err error) string {
 			return "connection_failure"
 		case "57P01":
 			return "admin_shutdown"
+		case "57014":
+			return "statement_timeout"
 		case "08001":
 			return "connection_rejected"
 		case "08004":
@@ -804,6 +875,9 @@ func classifyError(err error) string {
 		}
 		if errors.Is(netErr.Err, syscall.ECONNREFUSED) {
 			return "connection_refused"
+		}
+		if errors.Is(netErr.Err, syscall.ECONNABORTED) {
+			return "connection_aborted"
 		}
 		return "net_op_error"
 	}

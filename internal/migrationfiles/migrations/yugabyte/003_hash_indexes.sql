@@ -1,32 +1,32 @@
--- Migration 003: Replace single-column sort_id indexes with composite indexes.
+-- -- Migration 003: Replace single-column sort_id indexes with composite indexes.
+-- --
+-- -- Context: this migration runs on both single-node and multi-node (3-node) setups.
+-- -- Neither setup uses database-level colocation, so hash-partitioned indexes are
+-- -- allowed. On multi-node, HASH on state distributes inserts across tablets by state
+-- -- value, eliminating the rightmost-tablet hot spot caused by a monotonically
+-- -- increasing sort_id range index. On single-node the hash still works — three tablets
+-- -- are created on one TServer (no distribution benefit, but no correctness issue).
+-- --
+-- -- Fix:
+-- --   promises  — drop the single-column range index; add a composite (state ASC, sort_id ASC)
+-- --               index. state as the leading column satisfies the equality predicate
+-- --               "WHERE state = 1" efficiently and sort_id ASC within each state value
+-- --               enables ordered cursor pagination "ORDER BY sort_id ASC LIMIT N".
+-- --
+-- --   schedules — drop the single-column range index with no replacement.
+-- --               SELECT_ALL already uses idx_schedules_next_run_time; sort_id is only
+-- --               a tiebreaker. SEARCH cursor queries (sort_id < $1) can tolerate a
+-- --               full scan because the schedules table is small.
+-- --
+-- -- Tasks indexes are unchanged: idx_tasks_expires_at is a range index needed for
+-- -- correctness (WHERE expires_at <= $1 range queries), and tasks are not the primary
+-- -- bench target.
 --
--- Context: this migration runs on both single-node and multi-node (3-node) setups.
--- Neither setup uses database-level colocation, so hash-partitioned indexes are
--- allowed. On multi-node, HASH on state distributes inserts across tablets by state
--- value, eliminating the rightmost-tablet hot spot caused by a monotonically
--- increasing sort_id range index. On single-node the hash still works — three tablets
--- are created on one TServer (no distribution benefit, but no correctness issue).
+-- -- Promises: replace single-column index with composite index on (state, sort_id).
+-- -- HASH on state distributes inserts across tablets by state value on multi-node clusters.
+-- -- ASC on sort_id preserves ordered range scans within each state bucket for cursor pagination.
+-- DROP INDEX IF EXISTS idx_promises_sort_id;
+-- CREATE INDEX idx_promises_state_sort_id ON promises (state HASH, sort_id ASC);
 --
--- Fix:
---   promises  — drop the single-column range index; add a composite (state ASC, sort_id ASC)
---               index. state as the leading column satisfies the equality predicate
---               "WHERE state = 1" efficiently and sort_id ASC within each state value
---               enables ordered cursor pagination "ORDER BY sort_id ASC LIMIT N".
---
---   schedules — drop the single-column range index with no replacement.
---               SELECT_ALL already uses idx_schedules_next_run_time; sort_id is only
---               a tiebreaker. SEARCH cursor queries (sort_id < $1) can tolerate a
---               full scan because the schedules table is small.
---
--- Tasks indexes are unchanged: idx_tasks_expires_at is a range index needed for
--- correctness (WHERE expires_at <= $1 range queries), and tasks are not the primary
--- bench target.
-
--- Promises: replace single-column index with composite index on (state, sort_id).
--- HASH on state distributes inserts across tablets by state value on multi-node clusters.
--- ASC on sort_id preserves ordered range scans within each state bucket for cursor pagination.
-DROP INDEX IF EXISTS idx_promises_sort_id;
-CREATE INDEX idx_promises_state_sort_id ON promises (state HASH, sort_id ASC);
-
--- Schedules: drop hot-spot range index; next_run_time index covers all critical queries.
-DROP INDEX IF EXISTS idx_schedules_sort_id;
+-- -- Schedules: drop hot-spot range index; next_run_time index covers all critical queries.
+-- DROP INDEX IF EXISTS idx_schedules_sort_id;

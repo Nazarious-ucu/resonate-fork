@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS promises (
                                         created_on                   BIGINT,
                                         completed_on                 BIGINT,
                                         PRIMARY KEY(id)
-);
+) SPLIT INTO 3 TABLETS;
 
 CREATE INDEX IF NOT EXISTS idx_promises_sort_id ON promises(sort_id);
 
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS callbacks (
                                          mesg            BYTEA,
                                          timeout         BIGINT,
                                          created_on      BIGINT
-);
+) SPLIT INTO 3 TABLETS;
 
 CREATE TABLE IF NOT EXISTS schedules (
                                          id                    TEXT,
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS schedules (
                                          idempotency_key       TEXT,
                                          created_on            BIGINT,
                                          PRIMARY KEY(id)
-);
+) SPLIT INTO 3 TABLETS;
 
 CREATE INDEX IF NOT EXISTS idx_schedules_sort_id ON schedules(sort_id);
 CREATE INDEX IF NOT EXISTS idx_schedules_next_run_time ON schedules(next_run_time);
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS tasks (
                                      created_on      BIGINT,
                                      completed_on    BIGINT,
                                      PRIMARY KEY(id)
-);
+) SPLIT INTO 3 TABLETS;
 
 CREATE INDEX IF NOT EXISTS idx_tasks_process_id ON tasks(process_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_expires_at ON tasks(expires_at);

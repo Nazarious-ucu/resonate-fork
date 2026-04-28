@@ -318,6 +318,8 @@ type Config struct {
 	TopologyKeys      string            `flag:"topology-keys" desc:"topology-aware routing keys (e.g. cloud.region.zone1)" default:""`
 	MaxRetries        int               `flag:"max-retries" desc:"max transaction retries on serialization/deadlock error" default:"3"`
 	RefreshInterval   int               `flag:"refresh-interval" desc:"cluster node list refresh interval in seconds" default:"300"`
+	CleanupRetention  time.Duration     `flag:"cleanup-retention" desc:"minimum age of completed promises/tasks before cleanup deletes them (0 disables cleanup)" default:"24h"`
+	CleanupInterval   time.Duration     `flag:"cleanup-interval" desc:"how often the cleanup goroutine runs" default:"5m"`
 }
 
 func (c *Config) Bind(cmd *cobra.Command, flg *pflag.FlagSet, vip *viper.Viper, name string, prefix string, keyPrefix string) {
@@ -384,10 +386,6 @@ func NewConn(ctx context.Context, config *ConnConfig) (*pgxpool.Pool, error) {
 		rawQuery = append(rawQuery, fmt.Sprintf("%s=%s", q.Key, q.Value))
 	}
 
-	// Build the host list: primary host + any fallback hosts, all on the same
-	// port.  Multiple hosts in the DSN allow the pgx smart driver to fall over
-	// to a live node when the primary contact node is unavailable, so the
-	// connection pool survives a primary-node kill without returning errors.
 	allHosts := []string{fmt.Sprintf("%s:%s", config.Host, config.Port)}
 	for _, h := range strings.Split(config.FallbackHosts, ",") {
 		h = strings.TrimSpace(h)
@@ -427,36 +425,8 @@ func NewConn(ctx context.Context, config *ConnConfig) (*pgxpool.Pool, error) {
 	}
 	poolConfig.HealthCheckPeriod = healthCheck
 
-	// Validate connections before handing them to workers so dead conns are
-	// evicted immediately rather than surfacing as errors inside a transaction.
 	poolConfig.PrepareConn = func(ctx context.Context, conn *pgx.Conn) (bool, error) {
 		return conn.Ping(ctx) == nil, nil
-	}
-
-	// Increase batch nested loop join batch size for better multi-row lookups.
-	// statement_timeout aborts queries stalled on tablet leader election server-side,
-	// independent of Go context — protects against half-open TCP connections where
-	// ctx.Done() may not interrupt the blocking syscall in time. Must be less than
-	// attemptBudget (TxTimeout / (MaxRetries+1)) so the server abort lands before
-	// the Go-side per-attempt deadline.
-	poolConfig.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-		if _, err := conn.Exec(ctx, "SET yb_bnl_batch_size = 1024"); err != nil {
-			return err
-		}
-		_, err := conn.Exec(ctx, "SET statement_timeout = '2000'")
-		return err
-	}
-
-	// Enable OS-level TCP keepalives so the kernel detects dead YugaByte nodes
-	// within ~5 s instead of never. DSN-based libpq params (keepalives_idle etc.)
-	// are not recognized by YugaByte YSQL (SQLSTATE 42704), so we set them here
-	// via a custom dialer instead.
-	poolConfig.ConnConfig.Config.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		d := &net.Dialer{
-			KeepAlive: 3 * time.Second,
-			Timeout:   1 * time.Second,
-		}
-		return d.DialContext(ctx, network, addr)
 	}
 
 	return pgxpool.NewWithConfig(ctx, poolConfig)
@@ -527,24 +497,27 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 			metrics: metrics,
 		}
 	}
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		const retentionNs = int64(time.Hour)
-		for range ticker.C {
-			cutoff := time.Now().UnixNano() - retentionNs
-			if tag, err := db.Exec(context.Background(), TASK_CLEANUP_STATEMENT, cutoff); err != nil {
-				slog.Warn("task cleanup failed", "err", err)
-			} else {
-				slog.Info("task cleanup", "deleted", tag.RowsAffected())
+	if config.CleanupRetention > 0 && config.CleanupInterval > 0 {
+		retentionMs := config.CleanupRetention.Milliseconds()
+		interval := config.CleanupInterval
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for range ticker.C {
+				cutoff := time.Now().UnixMilli() - retentionMs
+				if tag, err := db.Exec(context.Background(), TASK_CLEANUP_STATEMENT, cutoff); err != nil {
+					slog.Warn("task cleanup failed", "err", err)
+				} else {
+					slog.Info("task cleanup", "deleted", tag.RowsAffected())
+				}
+				if tag, err := db.Exec(context.Background(), PROMISE_CLEANUP_STATEMENT, cutoff); err != nil {
+					slog.Warn("promise cleanup failed", "err", err)
+				} else {
+					slog.Info("promise cleanup", "deleted", tag.RowsAffected())
+				}
 			}
-			if tag, err := db.Exec(context.Background(), PROMISE_CLEANUP_STATEMENT, cutoff); err != nil {
-				slog.Warn("promise cleanup failed", "err", err)
-			} else {
-				slog.Info("promise cleanup", "deleted", tag.RowsAffected())
-			}
-		}
-	}()
+		}()
+	}
 
 	return &YugabyteStore{
 		config:  config,
@@ -773,9 +746,11 @@ func (w *YugabyteStoreWorker) executeOnce(ctx context.Context, transactions []*t
 
 	results, err := w.performCommands(ctx, tx, transactions)
 	if err != nil {
-		if rbErr := tx.Rollback(ctx); rbErr != nil {
-			err = fmt.Errorf("tx failed: %v, unable to rollback: %v", err, rbErr)
+		rbCtx, rbCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		if rbErr := tx.Rollback(rbCtx); rbErr != nil {
+			err = fmt.Errorf("tx failed: %w, unable to rollback: %v", err, rbErr)
 		}
+		rbCancel()
 		return nil, err
 	}
 

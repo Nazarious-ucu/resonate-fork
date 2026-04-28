@@ -118,7 +118,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		YugabyteTxDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "yugabyte_tx_duration_seconds",
 			Help:    "duration of YugaByte transactions in seconds",
-			Buckets: prometheus.DefBuckets,
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 15, 20, 30, 60},
 		}),
 		YugabytePoolConns: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "yugabyte_pool_connections",

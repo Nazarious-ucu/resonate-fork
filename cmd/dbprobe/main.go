@@ -69,7 +69,7 @@ func classify(err error) errInfo {
 		return errInfo{}
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return errInfo{"ctx/deadline", "context deadline exceeded", false, err.Error()}
+		return errInfo{"ctx/deadline", "context deadline exceeded", true, err.Error()}
 	}
 	if errors.Is(err, context.Canceled) {
 		return errInfo{"ctx/canceled", "context canceled", false, err.Error()}
@@ -81,7 +81,8 @@ func classify(err error) errInfo {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		retryable := pgErr.Code == "40001" || pgErr.Code == "40P01" ||
-			pgErr.Code == "XX000" || pgErr.Code == "08006" || pgErr.Code == "57P01"
+			pgErr.Code == "XX000" || pgErr.Code == "08006" ||
+			pgErr.Code == "57P01" || pgErr.Code == "57014"
 		return errInfo{
 			sqlstate:  pgErr.Code + " " + sqlstateLabel(pgErr.Code),
 			msg:       trimMsg(pgErr.Message),
@@ -663,7 +664,7 @@ func sortedKeys(m map[string]int64) []string {
 }
 
 func isRetryableLabel(label string) bool {
-	for _, prefix := range []string{"40001", "40P01", "XX000", "08006", "57P01", "conn/eof", "net/"} {
+	for _, prefix := range []string{"40001", "40P01", "XX000", "08006", "57P01", "57014", "conn/eof", "net/", "ctx/deadline"} {
 		if strings.HasPrefix(label, prefix) {
 			return true
 		}
@@ -761,7 +762,7 @@ func main() {
 	user := flag.String("user", "yugabyte", "database user")
 	pass := flag.String("pass", "yugabyte", "database password")
 	maxConns := flag.Int("max-conns", 4, "pgxpool MaxConns")
-	interval := flag.Duration("interval", 200*time.Millisecond, "sleep between probe iterations")
+	interval := flag.Duration("interval", 50*time.Millisecond, "sleep between probe iterations")
 	bannerInterval := flag.Duration("banner", 5*time.Second, "how often to print the summary banner")
 	stmtTimeout := flag.Int("statement-timeout", 20000, "per-statement timeout in milliseconds")
 	loadBalance := flag.Bool("load-balance", false,

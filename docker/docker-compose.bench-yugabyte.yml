@@ -1,28 +1,3 @@
-# YugabyteDB benchmark environment — 3-node cluster with a containerised bench runner.
-#
-# The bench runner executes inside Docker on the same network as the YugaByte
-# nodes, so yb-node1/2/3 hostnames resolve natively and load balancing works.
-#
-# ── Usage ────────────────────────────────────────────────────────────────────
-#
-# 1. Start the cluster and wait for it to be ready:
-#      docker compose -f docker/docker-compose.bench-yugabyte.yml up -d yb-node1 yb-node2 yb-node3 yb-init
-#      docker compose -f docker/docker-compose.bench-yugabyte.yml wait yb-init
-#
-# 2. Run micro-benchmarks (streams output to your terminal):
-#      docker compose -f docker/docker-compose.bench-yugabyte.yml run --rm bench-runner
-#
-# 3. Run the sustained load test instead:
-#      docker compose -f docker/docker-compose.bench-yugabyte.yml run --rm \
-#        -e BENCH_TARGET=load \
-#        -e BENCH_LOAD_DURATION=60s \
-#        -e BENCH_CSV_PATH=/results/load.csv \
-#        bench-runner
-#      # Results are written to benchmarks/results/load.csv on your host.
-#
-# Tear down:
-#      docker compose -f docker/docker-compose.bench-yugabyte.yml down -v
-
 services:
   # ── YugabyteDB 3-node cluster ─────────────────────────────────────────────
 
@@ -169,9 +144,6 @@ services:
       TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_LOAD_BALANCE: "true"
       # Set BENCH_TARGET=load to run the sustained load test instead.
       BENCH_TARGET: ${BENCH_TARGET:-micro}
-      # Set BENCH_BATCH_SIZE to control how many AIO submissions are batched
-      # into a single DB transaction. Higher values amortize Raft overhead.
-      # Default 1 matches the original behaviour; try 50 or 100 for throughput.
       BENCH_BATCH_SIZE: 1000
       BENCH_LOAD_DURATION: ${BENCH_LOAD_DURATION:-60s}
       BENCH_CSV_PATH: ${BENCH_CSV_PATH:-/results/load.csv}

@@ -1,31 +1,3 @@
-# Fault-tolerance benchmark environment.
-# Runs a 3-node YugabyteDB cluster + a Resonate server.
-# Used by:
-#   benchmarks/fault_tolerance_test.go
-#
-# The test kills yb-node2 mid-run via `docker stop yb-node2` to simulate a
-# node failure, then restarts it and measures recovery.  The Resonate server
-# must remain reachable throughout — YugaByte's RF=3 quorum means one dead
-# node should not cause downtime.
-#
-# IMPORTANT: the host running the tests needs Docker access so the test can
-# exec `docker stop / docker start`.  If you're running inside a container
-# yourself, mount /var/run/docker.sock.
-#
-# Usage:
-#   docker compose -f docker/docker-compose.fault-tolerance.yml up -d
-#   # Wait ~40 s for the full cluster + Resonate to be healthy.
-#
-#   FAULT_TEST_ENABLED=true \
-#   RESONATE_URL=http://localhost:8001 \
-#   FAULT_CONTAINER=yb-node2 \
-#   go test -v -timeout=5m ./benchmarks/
-#
-# Watch the YugaByte UI at http://localhost:15433 while the test runs.
-#
-# Tear down:
-#   docker compose -f docker/docker-compose.fault-tolerance.yml down -v
-
 services:
   # ── YugabyteDB cluster ────────────────────────────────────────────────────
 
@@ -39,8 +11,6 @@ services:
       - --advertise_address=yb-node1
       - --cloud_location=cloud.region.zone1
       - --fault_tolerance=zone
-      # Start rebalancing tablet leaders immediately after a node rejoins
-      # (default is 120s, which causes degraded baselines in sequential tests).
       - --master_flags=load_balancer_initial_delay_secs=0
     ports:
       - "5433:5433"
@@ -67,9 +37,6 @@ services:
       - --fault_tolerance=zone
       - --master_flags=load_balancer_initial_delay_secs=0
     ports:
-      # Exposed on 5434 so store fault-tolerance tests can reach this node
-      # directly from the host when testing primary-node kill scenarios.
-      # YB_FT_HOSTS=localhost:5433,localhost:5434,localhost:5435
       - "5434:5433"
     depends_on:
       yb-node1:

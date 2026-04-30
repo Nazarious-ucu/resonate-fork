@@ -281,16 +281,18 @@ const (
 		process_id = $2 AND state = 4`
 
 	// YugabyteDB does not support DELETE ... LIMIT; use a subquery instead.
+	// Task states: Completed=8, Timedout=16 (terminal states with completed_on set).
 	TASK_CLEANUP_STATEMENT = `
 	DELETE FROM tasks
 	WHERE id IN (
-		SELECT id FROM tasks WHERE state = 8 AND completed_on < $1 LIMIT 1000
+		SELECT id FROM tasks WHERE state IN (8, 16) AND completed_on < $1 LIMIT 1000
 	)`
 
+	// Promise states: Resolved=2, Rejected=4, Canceled=8, Timedout=16 (all terminal, all set completed_on).
 	PROMISE_CLEANUP_STATEMENT = `
 	DELETE FROM promises
 	WHERE id IN (
-		SELECT id FROM promises WHERE state IN (2, 4) AND completed_on < $1 LIMIT 1000
+		SELECT id FROM promises WHERE state IN (2, 4, 8, 16) AND completed_on < $1 LIMIT 1000
 	)`
 )
 
@@ -501,20 +503,11 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 		retentionMs := config.CleanupRetention.Milliseconds()
 		interval := config.CleanupInterval
 		go func() {
+			runCleanup(db, retentionMs)
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for range ticker.C {
-				cutoff := time.Now().UnixMilli() - retentionMs
-				if tag, err := db.Exec(context.Background(), TASK_CLEANUP_STATEMENT, cutoff); err != nil {
-					slog.Warn("task cleanup failed", "err", err)
-				} else {
-					slog.Info("task cleanup", "deleted", tag.RowsAffected())
-				}
-				if tag, err := db.Exec(context.Background(), PROMISE_CLEANUP_STATEMENT, cutoff); err != nil {
-					slog.Warn("promise cleanup failed", "err", err)
-				} else {
-					slog.Info("promise cleanup", "deleted", tag.RowsAffected())
-				}
+				runCleanup(db, retentionMs)
 			}
 		}()
 	}
@@ -525,6 +518,31 @@ func New(aio aio.AIO, metrics *metrics.Metrics, config *Config) (*YugabyteStore,
 		db:      db,
 		workers: workers,
 	}, nil
+}
+
+// runCleanup deletes terminal-state tasks and promises older than retentionMs,
+// looping per-statement until a batch returns 0 rows so the per-tick LIMIT does
+// not cap throughput when the backlog is large.
+func runCleanup(db *pgxpool.Pool, retentionMs int64) {
+	cutoff := time.Now().UnixMilli() - retentionMs
+	drain := func(name, stmt string) {
+		var total int64
+		for {
+			tag, err := db.Exec(context.Background(), stmt, cutoff)
+			if err != nil {
+				slog.Warn(name+" cleanup failed", "err", err, "deleted_before_err", total)
+				return
+			}
+			n := tag.RowsAffected()
+			total += n
+			if n == 0 {
+				break
+			}
+		}
+		slog.Info(name+" cleanup", "deleted", total)
+	}
+	drain("task", TASK_CLEANUP_STATEMENT)
+	drain("promise", PROMISE_CLEANUP_STATEMENT)
 }
 
 func (s *YugabyteStore) String() string {

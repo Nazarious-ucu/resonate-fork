@@ -1,0 +1,21 @@
+aio:
+  subsystems:
+    store:
+      sqlite:
+        enabled: false
+      postgres:
+        enabled: false
+      yugabyte:
+        enabled: true
+        config:
+          host: yb-node1
+          fallback-hosts: yb-node2,yb-node3
+          port: "5433"
+          username: yugabyte
+          password: yugabyte
+          database: resonate
+          load-balance: true
+          max-open-conns: 8
+          max-idle-conns: 8
+          query:
+            sslmode: disable

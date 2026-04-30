@@ -34,3 +34,9 @@ coverage.out
 dst*.html
 redoc-static.html
 api/index.html
+/benchmarks/results*
+/benchmarks/results/
+/benchmarks/comparison*
+/benchmarks/charts/
+/docker/grafana/dashboards/fault_tolerance.json
+internal/app/subsystems/aio/store/yugabyte/results*

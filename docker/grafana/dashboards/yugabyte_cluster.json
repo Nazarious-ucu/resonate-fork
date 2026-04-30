@@ -1,0 +1,590 @@
+{
+  "title": "YugaByte Cluster — Internal Metrics",
+  "uid": "yugabyte-cluster",
+  "description": "YugaByte DB internal metrics scraped from TServer (:9000) and Master (:7000) /prometheus-metrics endpoints",
+  "tags": ["yugabyte", "cluster", "fault-tolerance"],
+  "schemaVersion": 37,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "graphTooltip": 1,
+  "editable": true,
+  "style": "dark",
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "node",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(up{job=\"yb_tserver\"}, instance)",
+        "label": "TServer Node",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "TServer Nodes Up",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "green",  "value": 3 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(up{job=\"yb_tserver\"})",
+        "legendFormat": "nodes up",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 2,
+      "title": "Master Nodes Up",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "green",  "value": 3 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(up{job=\"yb_master\"})",
+        "legendFormat": "masters up",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 3,
+      "title": "Tablets Running",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(tablets_num_running{job=\"yb_tserver\"})",
+        "legendFormat": "running",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 4,
+      "title": "Tablets NOT Running",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red",    "value": 3 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(tablets_num_not_running{job=\"yb_tserver\"})",
+        "legendFormat": "not running",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 5,
+      "title": "Under-Replicated Tablets",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red",    "value": 5 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(under_replicated_tablets{job=\"yb_master\"})",
+        "legendFormat": "under-replicated",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 6,
+      "title": "Failed Elections (range)",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red",    "value": 5 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(increase(failed_elections{job=\"yb_tserver\"}[$__range]))",
+        "legendFormat": "failed elections",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 10,
+      "title": "Node Up/Down Status",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0, "max": 1,
+          "custom": { "lineWidth": 3, "fillOpacity": 30 },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN" }, "1": { "text": "UP" } } }
+          ],
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",   "value": null },
+              { "color": "green", "value": 1 }
+            ] }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "up{job=\"yb_tserver\",instance=~\"$node\"}",
+          "legendFormat": "tserver {{instance}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "up{job=\"yb_master\"}",
+          "legendFormat": "master {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 11,
+      "title": "Tablet Distribution per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "min": 0
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (instance) (tablets_num_running{job=\"yb_tserver\",instance=~\"$node\"})",
+          "legendFormat": "running — {{instance}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (instance) (tablets_num_not_running{job=\"yb_tserver\",instance=~\"$node\"})",
+          "legendFormat": "not running — {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 20,
+      "title": "Read RPC Latency per Node (p99)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 11, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "µs",
+          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 10000 },
+              { "color": "red",    "value": 100000 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(handler_latency_yb_tserver_TabletServerService_Read_sum{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval])) / sum by (instance) (rate(handler_latency_yb_tserver_TabletServerService_Read_count{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 21,
+      "title": "Write RPC Latency per Node (p99)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 11, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean","max"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "µs",
+          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 10000 },
+              { "color": "red",    "value": 100000 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(handler_latency_yb_tserver_TabletServerService_Write_sum{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval])) / sum by (instance) (rate(handler_latency_yb_tserver_TabletServerService_Write_count{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 30,
+      "title": "Read RPC Throughput per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 19, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 8 }, "min": 0 }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(handler_latency_yb_tserver_TabletServerService_Read_count{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 31,
+      "title": "Write RPC Throughput per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 19, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 8 }, "min": 0 }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(handler_latency_yb_tserver_TabletServerService_Write_count{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 32,
+      "title": "RPC Queue Overflow / Timeout Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 19, "w": 8, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "lineWidth": 2, "fillOpacity": 20 },
+          "color": { "mode": "palette-classic" },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red",   "value": 0.01 }
+            ] }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (instance) (rate(rpcs_timed_out_in_queue{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "timed out — {{instance}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (instance) (rate(rpcs_queue_overflow{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "overflow — {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 40,
+      "title": "Raft Leader Rejections per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 26, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red",   "value": 0.01 }
+            ] }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (instance) (rate(not_leader_rejections{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "not-leader — {{instance}}",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (instance) (rate(leader_memory_pressure_rejections{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+          "legendFormat": "mem pressure — {{instance}}",
+          "refId": "B"
+        }
+      ]
+    },
+
+    {
+      "id": 41,
+      "title": "Failed Raft Elections per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 26, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "color": { "fixedColor": "red", "mode": "fixed" }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(failed_elections{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 50,
+      "title": "Follower Replication Lag per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 33, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red",    "value": 2000 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "max by (instance) (follower_lag_ms{job=\"yb_tserver\",instance=~\"$node\"})",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 51,
+      "title": "Active RPC Connections per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 33, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 8 },
+          "min": 0
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "rpc_connections_alive{job=\"yb_tserver\",instance=~\"$node\"}",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 60,
+      "title": "Storage Write Throughput per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "custom": { "lineWidth": 2, "fillOpacity": 8 }, "min": 0 }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(rocksdb_bytes_written{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    },
+
+    {
+      "id": 61,
+      "title": "WAL Bytes Logged per Node",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 40, "w": 12, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "custom": { "lineWidth": 2, "fillOpacity": 8 }, "min": 0 }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum by (instance) (rate(log_bytes_logged{job=\"yb_tserver\",instance=~\"$node\"}[$__rate_interval]))",
+        "legendFormat": "{{instance}}",
+        "refId": "A"
+      }]
+    }
+
+  ]
+}

@@ -1,0 +1,173 @@
+# Fault-tolerance benchmark environment.
+# Runs a 3-node YugabyteDB cluster + a Resonate server.
+# Used by:
+#   benchmarks/fault_tolerance_test.go
+#
+# The test kills yb-node2 mid-run via `docker stop yb-node2` to simulate a
+# node failure, then restarts it and measures recovery.  The Resonate server
+# must remain reachable throughout — YugaByte's RF=3 quorum means one dead
+# node should not cause downtime.
+#
+# IMPORTANT: the host running the tests needs Docker access so the test can
+# exec `docker stop / docker start`.  If you're running inside a container
+# yourself, mount /var/run/docker.sock.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.fault-tolerance.yml up -d
+#   # Wait ~40 s for the full cluster + Resonate to be healthy.
+#
+#   FAULT_TEST_ENABLED=true \
+#   RESONATE_URL=http://localhost:8001 \
+#   FAULT_CONTAINER=yb-node2 \
+#   go test -v -timeout=5m ./benchmarks/
+#
+# Watch the YugaByte UI at http://localhost:15433 while the test runs.
+#
+# Tear down:
+#   docker compose -f docker/docker-compose.fault-tolerance.yml down -v
+
+services:
+  # ── YugabyteDB cluster ────────────────────────────────────────────────────
+
+  yb-node1:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node1
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node1
+      - --cloud_location=cloud.region.zone1
+      - --fault_tolerance=zone
+      # Start rebalancing tablet leaders immediately after a node rejoins
+      # (default is 120s, which causes degraded baselines in sequential tests).
+      - --master_flags=load_balancer_initial_delay_secs=0
+    ports:
+      - "5433:5433"
+      - "7001:7000"
+      - "9000:9000"
+      - "15433:15433"
+    healthcheck:
+      test: ["CMD-SHELL", "yugabyted status | grep -q 'Running'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  yb-node2:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    # Keep this name in sync with FAULT_CONTAINER in the test command above.
+    container_name: yb-node2
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node2
+      - --join=yb-node1
+      - --cloud_location=cloud.region.zone2
+      - --fault_tolerance=zone
+      - --master_flags=load_balancer_initial_delay_secs=0
+    ports:
+      # Exposed on 5434 so store fault-tolerance tests can reach this node
+      # directly from the host when testing primary-node kill scenarios.
+      # YB_FT_HOSTS=localhost:5433,localhost:5434,localhost:5435
+      - "5434:5433"
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+
+  yb-node3:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node3
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node3
+      - --join=yb-node1
+      - --cloud_location=cloud.region.zone3
+      - --fault_tolerance=zone
+      - --master_flags=load_balancer_initial_delay_secs=0
+    ports:
+      # Exposed on 5435 for the same reason as yb-node2 above.
+      - "5435:5433"
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+
+  yb-init:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-init
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+      yb-node2:
+        condition: service_started
+      yb-node3:
+        condition: service_started
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        masters="yb-node1:7100,yb-node2:7100,yb-node3:7100"
+        until ysqlsh -h yb-node1 -U yugabyte -c '\l' 2>/dev/null; do
+          echo "Waiting for YSQL..."
+          sleep 2
+        done
+        until yb-admin -master_addresses "$$masters" list_all_masters >/dev/null 2>&1; do
+          echo "Waiting for all masters to be ready..."
+          sleep 2
+        done
+        echo "Setting replication factor 3..."
+        yb-admin -master_addresses "$$masters" \
+          modify_placement_info cloud.region.zone1,cloud.region.zone2,cloud.region.zone3 3
+        echo "Creating resonate database..."
+        ysqlsh -h yb-node1 -U yugabyte -c \
+          "SELECT 'exists' FROM pg_database WHERE datname='resonate'" \
+          | grep -q exists \
+          || ysqlsh -h yb-node1 -U yugabyte -c "CREATE DATABASE resonate"
+        echo "Cluster ready."
+    restart: "no"
+
+  # ── Resonate server ───────────────────────────────────────────────────────
+
+  resonate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: resonate-ft
+    command:
+      - serve
+      - --aio-store-sqlite-enable=false
+      - --aio-store-yugabyte-enable
+      - "true"
+      - --aio-store-yugabyte-host
+      - yb-node1
+      - --aio-store-yugabyte-fallback-hosts
+      - yb-node2,yb-node3
+      - --aio-store-yugabyte-port
+      - "5433"
+      - --aio-store-yugabyte-username
+      - yugabyte
+      - --aio-store-yugabyte-password
+      - yugabyte
+      - --aio-store-yugabyte-database
+      - resonate
+      - --aio-store-yugabyte-query
+      - sslmode=disable
+      - --aio-store-yugabyte-load-balance
+      - "true"
+      - --aio-store-yugabyte-workers
+      - "4"
+    ports:
+      - "8001:8001"
+      - "8002:8002"
+    environment:
+      PUSHGATEWAY_URL: http://host.docker.internal:9091
+    depends_on:
+      yb-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8001/promises?limit=1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12

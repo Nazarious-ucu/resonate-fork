@@ -11,6 +11,8 @@ FROM cgr.dev/chainguard/glibc-dynamic
 
 WORKDIR /app
 COPY --from=builder /app/resonate .
+# busybox (static) is used by the Docker healthcheck — provides wget without a shell.
+COPY --from=busybox:1.36 /bin/busybox /bin/busybox
 
 EXPOSE 8001
 EXPOSE 8002

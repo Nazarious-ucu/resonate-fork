@@ -1,0 +1,108 @@
+groups:
+
+  # ── Fault-tolerance test alerts ───────────────────────────────────────────────
+  - name: fault_tolerance_tests
+    rules:
+
+      # Fires when any test phase has >10% error rate (net errors + 5xx).
+      # Expected: brief spike during-failure is tolerated by the 1% budget in
+      # the test assertions — this alert fires for sustained degradation.
+      - alert: FaultTestHighErrorRate
+        expr: |
+          sum(rate(resonate_ft_ops_total{result=~"http_5xx|net_error"}[1m])) by (test_name, phase)
+          /
+          sum(rate(resonate_ft_ops_total[1m])) by (test_name, phase)
+          > 0.10
+        for: 15s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate in {{ $labels.test_name }} / {{ $labels.phase }}"
+          description: "Error rate is {{ $value | humanizePercentage }} (>10%) in phase {{ $labels.phase }} of test {{ $labels.test_name }}"
+
+      # Fires when the cluster appears fully unavailable (0 successful ops for 10s).
+      - alert: FaultTestClusterUnavailable
+        expr: |
+          sum(rate(resonate_ft_ops_total{result="success"}[30s])) by (test_name) == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cluster fully unavailable during {{ $labels.test_name }}"
+          description: "No successful operations recorded for 10s during test {{ $labels.test_name }}"
+
+      # Fires when an after-recovery phase shows availability below 90%.
+      # The cluster must fully recover after a node is restarted.
+      - alert: FaultTestRecoveryIncomplete
+        expr: |
+          resonate_ft_availability_ratio{phase=~"after.*"} < 0.90
+        for: 5s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Incomplete recovery in {{ $labels.test_name }}"
+          description: "Availability is {{ $value | humanizePercentage }} (<90%) in recovery phase {{ $labels.phase }} of test {{ $labels.test_name }}"
+
+      # Fires when data loss is detected (actual DB rows < expected).
+      - alert: FaultTestDataLoss
+        expr: |
+          resonate_ft_data_integrity_rows{row_type="actual"}
+          <
+          resonate_ft_data_integrity_rows{row_type="expected"}
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Data loss detected in {{ $labels.test_name }} at {{ $labels.checkpoint }}"
+          description: "Expected {{ $labels.row_type }} rows but got fewer in test {{ $labels.test_name }} checkpoint {{ $labels.checkpoint }}"
+
+      # Fires when recovery latency exceeds 60 seconds.
+      - alert: FaultTestSlowRecovery
+        expr: resonate_ft_recovery_duration_seconds > 60
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow cluster recovery in {{ $labels.test_name }}"
+          description: "Recovery took {{ $value | humanizeDuration }} (threshold: 60s)"
+
+  # ── Resonate server health alerts ─────────────────────────────────────────────
+  - name: resonate_server
+    rules:
+
+      # Fires when Prometheus can no longer scrape the Resonate metrics endpoint.
+      - alert: ResonateServerDown
+        expr: up{job="resonate"} == 0
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Resonate server is unreachable"
+          description: "Prometheus cannot scrape http://resonate-ft:9090/metrics — server may be down"
+
+      # Fires when Resonate HTTP 5xx error rate exceeds 5%.
+      - alert: ResonateHighHttpErrorRate
+        expr: |
+          sum(rate(http_requests_total{status=~"5.."}[1m]))
+          /
+          sum(rate(http_requests_total[1m]))
+          > 0.05
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High HTTP 5xx error rate on Resonate"
+          description: "5xx rate is {{ $value | humanizePercentage }} (>5%)"
+
+      # Fires when p99 HTTP latency exceeds 2 seconds.
+      - alert: ResonateHighLatency
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(http_requests_duration_seconds_bucket[2m])) by (le, path)
+          ) > 2
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "High p99 latency on Resonate (path: {{ $labels.path }})"
+          description: "p99 latency is {{ $value | humanizeDuration }} on {{ $labels.path }}"

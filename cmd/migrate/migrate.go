@@ -10,9 +10,11 @@ import (
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/migrations"
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/postgres"
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/sqlite"
+	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/yugabyte"
 	internalUtil "github.com/resonatehq/resonate/internal/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"github.com/yugabyte/pgx/v5/stdlib"
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
@@ -235,6 +237,14 @@ func getMigrationStore(cfg *config.Config) (migrations.MigrationStore, error) {
 
 			store := subsystem.(*sqlite.SqliteStore)
 			return migrations.NewSqliteMigrationStore(store.DB()), nil
+		}
+		if plugin.Name() == "store-yugabyte" && plugin.Enabled() {
+			subsystem, err := plugin.New(nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			store := subsystem.(*yugabyte.YugabyteStore)
+			return migrations.NewPostgresMigrationStore(stdlib.OpenDBFromPool(store.DB())), nil
 		}
 	}
 

@@ -167,11 +167,12 @@ func EnqueueTasks(c gocoro.Coroutine[*t_aio.Submission, *t_aio.Completion, any],
 			}
 
 			completion, err := gocoro.Await(c, awaiting[i])
-			if err != nil && t.Mesg.Type != message.Notify {
-				slog.Warn("failed to send task", "err", err)
+			if err != nil {
+				slog.Warn("failed to send task", "err", err, "type", t.Mesg.Type)
 			}
 
-			if t.Mesg.Type == message.Notify {
+			if t.Mesg.Type == message.Notify && err == nil && completion.Sender.Success {
+				// Notify delivered successfully — complete the task.
 				commands = append(commands, &t_aio.UpdateTaskCommand{
 					Id:             t.Id,
 					ProcessId:      nil,
@@ -180,6 +181,29 @@ func EnqueueTasks(c gocoro.Coroutine[*t_aio.Submission, *t_aio.Completion, any],
 					Attempt:        0,
 					Ttl:            0,
 					ExpiresAt:      0,
+					CurrentStates:  []task.State{task.Init},
+					CurrentCounter: t.Counter,
+				})
+			} else if t.Mesg.Type == message.Notify {
+				// Notify delivery failed (no SSE connection on this server, or send error).
+				// Retry so another server instance — or this one after the subscriber
+				// reconnects — can deliver it.
+				var expiresAt int64
+				if err != nil {
+					expiresAt = util.ClampAddInt64(c.Time(), 15000) // fallback to 15s
+				} else if completion.Sender.TimeToRetry > 0 {
+					expiresAt = util.ClampAddInt64(c.Time(), completion.Sender.TimeToRetry)
+				} else {
+					expiresAt = util.ClampAddInt64(c.Time(), 15000)
+				}
+				slog.Debug("notify delivery failed, will retry", "id", t.Id, "expiresAt", expiresAt)
+				commands = append(commands, &t_aio.UpdateTaskCommand{
+					Id:             t.Id,
+					State:          task.Init,
+					Counter:        t.Counter,
+					Attempt:        t.Attempt + 1,
+					Ttl:            0,
+					ExpiresAt:      expiresAt,
 					CurrentStates:  []task.State{task.Init},
 					CurrentCounter: t.Counter,
 				})

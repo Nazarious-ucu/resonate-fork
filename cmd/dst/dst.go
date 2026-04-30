@@ -6,6 +6,7 @@ import (
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/sender"
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/postgres"
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/sqlite"
+	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/yugabyte"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -28,6 +29,7 @@ func NewCmd() *cobra.Command {
 	cfg.AIO.Subsystems.Add("router", true, &router.Config{})
 	cfg.AIO.Subsystems.Add("store-postgres", false, &postgres.Config{}) // do not change order
 	cfg.AIO.Subsystems.Add("store-sqlite", true, &sqlite.Config{})
+	cfg.AIO.Subsystems.Add("store-yugabyte", false, &yugabyte.Config{})
 
 	// Add subcommands
 	cmd.AddCommand(RunDSTCmd(cfg, vip))

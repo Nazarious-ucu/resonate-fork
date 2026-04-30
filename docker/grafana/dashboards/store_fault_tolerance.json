@@ -1,0 +1,547 @@
+{
+  "title": "Resonate — Store-Layer Fault Tolerance Tests",
+  "uid": "resonate-store-ft",
+  "description": "Direct-store fault-tolerance metrics from YugabyteStoreWorker.Execute() calls (internal/.../yugabyte/store_fault_tolerance_test.go). No HTTP overhead — measures pure store-layer resilience.",
+  "tags": ["resonate", "fault-tolerance", "yugabyte", "store"],
+  "schemaVersion": 37,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "graphTooltip": 1,
+  "editable": true,
+  "style": "dark",
+
+  "annotations": {
+    "list": [
+      {
+        "name": "Test start",
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(255, 200, 0, 0.8)",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "increase(resonate_store_ft_test_starts_total[30s]) > 0",
+        "step": "2s",
+        "titleFormat": "▶ {{test_name}}",
+        "textFormat": "test started",
+        "useValueForTime": false
+      }
+    ]
+  },
+
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "pluginId": "prometheus",
+        "label": "Datasource",
+        "hide": 0,
+        "current": { "selected": true, "text": "Prometheus", "value": "prometheus" }
+      },
+      {
+        "name": "test_name",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(resonate_store_ft_ops_total, test_name)",
+        "label": "Test",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
+
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Successful Ops (range)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "colorMode": "value", "graphMode": "area", "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute",
+            "steps": [{ "color": "blue", "value": null }] } }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(increase(resonate_store_ft_ops_total{job=\"store_fault_tests\",test_name=~\"$test_name\",result=\"success\"}[$__range]))",
+        "legendFormat": "successful ops", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 2,
+      "title": "Store Errors",
+      "description": "Transaction failures after all retries — should be 0. Non-zero means data integrity risk.",
+      "type": "stat",
+      "gridPos": { "x": 5, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "colorMode": "background", "graphMode": "none", "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red",   "value": 1 }
+            ] } }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(increase(resonate_store_ft_ops_total{job=\"store_fault_tests\",test_name=~\"$test_name\",result=\"store_error\"}[$__range]))",
+        "legendFormat": "store errors", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 3,
+      "title": "Net Errors",
+      "description": "Connection / timeout errors — expected during fault injection (node is unreachable).",
+      "type": "stat",
+      "gridPos": { "x": 10, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "colorMode": "background", "graphMode": "none", "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "short",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "orange", "value": 500 }
+            ] } }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(increase(resonate_store_ft_ops_total{job=\"store_fault_tests\",test_name=~\"$test_name\",result=\"net_error\"}[$__range]))",
+        "legendFormat": "net errors", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 4,
+      "title": "Availability (last phase)",
+      "description": "Fraction of successful Execute() calls in the most recently completed phase.",
+      "type": "stat",
+      "gridPos": { "x": 15, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background", "graphMode": "none", "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 0.8 },
+              { "color": "green",  "value": 0.95 }
+            ] } }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "avg(last_over_time(resonate_store_ft_availability_ratio{test_name=~\"$test_name\"}[$__range]))",
+        "legendFormat": "availability", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 5,
+      "title": "P99 Latency (last phase)",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background", "graphMode": "none", "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "s",
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 0.1 },
+              { "color": "red",    "value": 0.5 }
+            ] } }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "histogram_quantile(0.99, sum(rate(resonate_store_ft_latency_seconds_bucket{job=\"store_fault_tests\",test_name=~\"$test_name\"}[$__rate_interval])) by (le))",
+        "legendFormat": "p99", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 10,
+      "title": "Operations per Second",
+      "description": "Successful Execute() calls/s — drops to near-zero at fault injection, recovers afterwards.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line", "lineInterpolation": "linear",
+            "lineWidth": 2, "fillOpacity": 8,
+            "showPoints": "never", "spanNulls": false
+          },
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(rate(resonate_store_ft_ops_total{job=\"store_fault_tests\",result=\"success\",test_name=~\"$test_name\"}[30s])) by (test_name) > 0",
+        "legendFormat": "{{test_name}}", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 11,
+      "title": "Latency Percentiles",
+      "description": "Store round-trip latency — spikes during leader election reveal tablet failover timing.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "last"] }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line", "lineInterpolation": "smooth",
+            "lineWidth": 2, "fillOpacity": 5, "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.99, sum(rate(resonate_store_ft_latency_seconds_bucket{job=\"store_fault_tests\",test_name=~\"$test_name\"}[$__rate_interval])) by (le, test_name))",
+          "legendFormat": "p99 {{test_name}}", "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.95, sum(rate(resonate_store_ft_latency_seconds_bucket{job=\"store_fault_tests\",test_name=~\"$test_name\"}[$__rate_interval])) by (le, test_name))",
+          "legendFormat": "p95 {{test_name}}", "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "histogram_quantile(0.50, sum(rate(resonate_store_ft_latency_seconds_bucket{job=\"store_fault_tests\",test_name=~\"$test_name\"}[$__rate_interval])) by (le, test_name))",
+          "legendFormat": "p50 {{test_name}}", "refId": "C"
+        }
+      ]
+    },
+
+    {
+      "id": 20,
+      "title": "Error Rate by Type",
+      "description": "net_error (purple) = expected during fault injection. store_error (red) = unexpected transaction failure — should be 0.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 13, "w": 14, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "bars", "barAlignment": 0,
+            "lineWidth": 1, "fillOpacity": 70,
+            "showPoints": "never",
+            "stacking": { "mode": "normal", "group": "A" }
+          },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "net_error" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#9c27b0", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "store_error" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#f44336", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(rate(resonate_store_ft_ops_total{job=\"store_fault_tests\",result!=\"success\",test_name=~\"$test_name\"}[$__rate_interval])) by (result)",
+        "legendFormat": "{{result}}", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 21,
+      "title": "Availability over Time",
+      "description": "Fraction of successful calls per phase. Green = ≥95%, yellow = 80–95%, red = <80%.",
+      "type": "timeseries",
+      "gridPos": { "x": 14, "y": 13, "w": 10, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "custom": {
+            "drawStyle": "line", "lineInterpolation": "stepAfter",
+            "lineWidth": 2, "fillOpacity": 15, "showPoints": "never"
+          },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 0.8 },
+              { "color": "green",  "value": 0.95 }
+            ] },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "resonate_store_ft_availability_ratio{test_name=~\"$test_name\"}",
+        "legendFormat": "{{test_name}} / {{phase}}", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 30,
+      "title": "Phase Throughput — before / during / after (ops/s at phase end)",
+      "description": "Compares baseline vs fault vs recovery throughput at a glance. Ideal: during ≈ before, after ≈ before.",
+      "type": "bargauge",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "color": { "mode": "continuous-GrYlRd" },
+          "thresholds": { "mode": "absolute",
+            "steps": [{ "color": "green", "value": null }] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "resonate_store_ft_ops_per_second{test_name=~\"$test_name\"}",
+        "legendFormat": "{{test_name}} / {{phase}}", "refId": "A", "instant": true
+      }]
+    },
+
+    {
+      "id": 31,
+      "title": "Phase Availability % — before / during / after (at phase end)",
+      "description": "RF=3 with 1 node down must keep availability ≥99% during-failure.",
+      "type": "bargauge",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showUnfilled": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1,
+          "color": { "mode": "continuous-RdYlGr" },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 0.8 },
+              { "color": "green",  "value": 0.95 }
+            ] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "resonate_store_ft_availability_ratio{test_name=~\"$test_name\"}",
+        "legendFormat": "{{test_name}} / {{phase}}", "refId": "A", "instant": true
+      }]
+    },
+
+    {
+      "id": 40,
+      "title": "Data Integrity — Expected vs Actual DB Rows",
+      "description": "expected = number of Execute() calls that returned nil. actual = SELECT COUNT(*) from the DB. Any mismatch = data loss.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 31, "w": 14, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": { "showHeader": true, "footer": { "show": false } },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "displayMode": "auto" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Value" },
+            "properties": [
+              { "id": "displayName", "value": "Row Count" },
+              { "id": "custom.displayMode", "value": "color-background" },
+              { "id": "thresholds", "value": { "mode": "absolute",
+                "steps": [{ "color": "green", "value": null }] } }
+            ] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "resonate_store_ft_data_integrity_rows{test_name=~\"$test_name\"}",
+        "legendFormat": "{{test_name}} / {{row_type}}",
+        "refId": "A", "instant": true, "format": "table"
+      }],
+      "transformations": [
+        { "id": "organize", "options": {
+          "renameByName": {
+            "test_name": "Test",
+            "row_type": "Type (expected / actual)",
+            "Value": "Row Count"
+          },
+          "excludeByName": {
+            "__name__": true, "instance": true, "job": true
+          }
+        } }
+      ]
+    },
+
+    {
+      "id": 41,
+      "title": "Store Error Breakdown",
+      "description": "store_error = transaction failure (unexpected). net_error = connection failure (expected). Ideal: store_error always 0.",
+      "type": "piechart",
+      "gridPos": { "x": 14, "y": 31, "w": 10, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "pieType": "donut",
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "right",
+          "values": ["value", "percent"] }
+      },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "net_error" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#9c27b0", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "store_error" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#f44336", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "success" },
+            "properties": [{ "id": "color", "value": { "fixedColor": "#4caf50", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(increase(resonate_store_ft_ops_total{job=\"store_fault_tests\",test_name=~\"$test_name\"}[$__range])) by (result)",
+        "legendFormat": "{{result}}", "refId": "A", "instant": true
+      }]
+    },
+
+    {
+      "id": 50,
+      "title": "Latency Heatmap",
+      "description": "Distribution of successful Execute() latencies over time. Hot bands during fault injection reveal retry/election overhead.",
+      "type": "heatmap",
+      "gridPos": { "x": 0, "y": 38, "w": 24, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "calculate": false,
+        "yAxis": { "unit": "s", "decimals": 3 },
+        "rowsFrame": { "layout": "auto" },
+        "tooltip": { "show": true, "yHistogram": true },
+        "legend": { "show": true },
+        "exemplars": { "color": "rgba(255,0,255,0.7)" },
+        "color": { "scheme": "Oranges", "mode": "scheme", "fill": "dark-orange" }
+      },
+      "fieldConfig": { "defaults": { "unit": "s",
+        "custom": { "hideFrom": { "legend": false, "tooltip": false, "viz": false } } } },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "sum(rate(resonate_store_ft_latency_seconds_bucket{job=\"store_fault_tests\",test_name=~\"$test_name\"}[$__rate_interval])) by (le)",
+        "format": "heatmap", "legendFormat": "{{le}}", "refId": "A"
+      }]
+    },
+
+    {
+      "id": 60,
+      "title": "Throughput Recovery Ratio",
+      "description": "after-recovery ops/s ÷ before-failure ops/s per test. Target: ≥65% within 30 s (tablet rebalancing still in progress).",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 47, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit", "min": 0, "max": 1.2,
+          "custom": {
+            "drawStyle": "line", "lineInterpolation": "stepAfter",
+            "lineWidth": 2, "fillOpacity": 10, "showPoints": "never"
+          },
+          "thresholds": { "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": null },
+              { "color": "yellow", "value": 0.65 },
+              { "color": "green",  "value": 0.90 }
+            ] },
+          "color": { "mode": "thresholds" }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "resonate_store_ft_ops_per_second{test_name=~\"$test_name\",phase=\"after-recovery\"} / resonate_store_ft_ops_per_second{test_name=~\"$test_name\",phase=\"before-failure\"}",
+        "legendFormat": "{{test_name}}", "refId": "A", "instant": true
+      }]
+    },
+
+    {
+      "id": 61,
+      "title": "Active Tests",
+      "description": "1 = test is currently running. Changes trigger the annotation markers on other panels.",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 47, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "none" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "min": 0, "max": 1,
+          "custom": {
+            "drawStyle": "line", "lineInterpolation": "stepAfter",
+            "lineWidth": 2, "fillOpacity": 30, "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "expr": "resonate_store_ft_test_active{test_name=~\"$test_name\"}",
+        "legendFormat": "{{test_name}}", "refId": "A"
+      }]
+    }
+
+  ]
+}

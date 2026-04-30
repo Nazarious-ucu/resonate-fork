@@ -1,0 +1,196 @@
+# YugabyteDB benchmark environment — 3-node cluster with a containerised bench runner.
+#
+# The bench runner executes inside Docker on the same network as the YugaByte
+# nodes, so yb-node1/2/3 hostnames resolve natively and load balancing works.
+#
+# ── Usage ────────────────────────────────────────────────────────────────────
+#
+# 1. Start the cluster and wait for it to be ready:
+#      docker compose -f docker/docker-compose.bench-yugabyte.yml up -d yb-node1 yb-node2 yb-node3 yb-init
+#      docker compose -f docker/docker-compose.bench-yugabyte.yml wait yb-init
+#
+# 2. Run micro-benchmarks (streams output to your terminal):
+#      docker compose -f docker/docker-compose.bench-yugabyte.yml run --rm bench-runner
+#
+# 3. Run the sustained load test instead:
+#      docker compose -f docker/docker-compose.bench-yugabyte.yml run --rm \
+#        -e BENCH_TARGET=load \
+#        -e BENCH_LOAD_DURATION=60s \
+#        -e BENCH_CSV_PATH=/results/load.csv \
+#        bench-runner
+#      # Results are written to benchmarks/results/load.csv on your host.
+#
+# Tear down:
+#      docker compose -f docker/docker-compose.bench-yugabyte.yml down -v
+
+services:
+  # ── YugabyteDB 3-node cluster ─────────────────────────────────────────────
+
+  yb-node1:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node1
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node1
+      - --cloud_location=cloud.region.zone1
+      - --fault_tolerance=zone
+    ports:
+      - "5433:5433"   # YSQL (for direct host access if needed)
+      - "7001:7000"   # master web UI
+      - "9000:9000"   # tserver web UI
+      - "15433:15433" # yugabyted web UI
+    healthcheck:
+      test: ["CMD-SHELL", "yugabyted status | grep -q 'Running'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  yb-node2:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node2
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node2
+      - --join=yb-node1
+      - --cloud_location=cloud.region.zone2
+      - --fault_tolerance=zone
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+
+  yb-node3:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-node3
+    command:
+      - bin/yugabyted
+      - start
+      - --daemon=false
+      - --advertise_address=yb-node3
+      - --join=yb-node1
+      - --cloud_location=cloud.region.zone3
+      - --fault_tolerance=zone
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+
+  yb-init:
+    image: yugabytedb/yugabyte:2025.2.1.0-b141
+    container_name: yb-init
+    depends_on:
+      yb-node1:
+        condition: service_healthy
+      yb-node2:
+        condition: service_started
+      yb-node3:
+        condition: service_started
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        masters="yb-node1:7100,yb-node2:7100,yb-node3:7100"
+        until ysqlsh -h yb-node1 -U yugabyte -c '\l' 2>/dev/null; do
+          echo "Waiting for YSQL..."
+          sleep 2
+        done
+        until yb-admin -master_addresses "$$masters" list_all_masters >/dev/null 2>&1; do
+          echo "Waiting for all masters to be ready..."
+          sleep 2
+        done
+        echo "Setting replication factor 3..."
+        yb-admin -master_addresses "$$masters" \
+          modify_placement_info cloud.region.zone1,cloud.region.zone2,cloud.region.zone3 3
+        echo "Creating resonate database..."
+        ysqlsh -h yb-node1 -U yugabyte -c \
+          "SELECT 'exists' FROM pg_database WHERE datname='resonate'" \
+          | grep -q exists \
+          || ysqlsh -h yb-node1 -U yugabyte -c "CREATE DATABASE resonate"
+        echo "Pre-creating tables with SPLIT INTO 3 TABLETS..."
+        split_sql='
+        CREATE TABLE IF NOT EXISTS promises (
+            id                           TEXT,
+            sort_id                      SERIAL,
+            state                        INTEGER DEFAULT 1,
+            param_headers                JSONB,
+            param_data                   BYTEA,
+            value_headers                JSONB,
+            value_data                   BYTEA,
+            timeout                      BIGINT,
+            idempotency_key_for_create   TEXT,
+            idempotency_key_for_complete TEXT,
+            tags                         JSONB,
+            created_on                   BIGINT,
+            completed_on                 BIGINT,
+            PRIMARY KEY(id)
+        ) SPLIT INTO 3 TABLETS;
+        CREATE TABLE IF NOT EXISTS tasks (
+            id              TEXT,
+            sort_id         SERIAL,
+            process_id      TEXT,
+            state           INTEGER DEFAULT 1,
+            root_promise_id TEXT,
+            recv            BYTEA,
+            mesg            BYTEA,
+            timeout         BIGINT,
+            counter         INTEGER DEFAULT 1,
+            attempt         INTEGER DEFAULT 0,
+            ttl             BIGINT DEFAULT 0,
+            expires_at      BIGINT DEFAULT 0,
+            created_on      BIGINT,
+            completed_on    BIGINT,
+            PRIMARY KEY(id)
+        ) SPLIT INTO 3 TABLETS;
+        '
+        echo "$$split_sql" | ysqlsh -h yb-node1 -U yugabyte -d resonate
+        echo "YugabyteDB bench cluster ready."
+    restart: "no"
+
+  # ── Benchmark runner ──────────────────────────────────────────────────────
+  # Runs inside Docker so yb-node1/2/3 hostnames resolve on the Docker network.
+  # The source tree is mounted read-only; results are written to benchmarks/results/.
+
+  bench-runner:
+    image: golang:1.25-alpine
+    container_name: yb-bench-runner
+    volumes:
+      - ..:/workspace:ro
+      - ../benchmarks/results:/results
+    working_dir: /workspace
+    environment:
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_HOST: yb-node1
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_FALLBACK_HOSTS: yb-node2,yb-node3
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PORT: "5433"
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_USERNAME: yugabyte
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_PASSWORD: yugabyte
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_DATABASE: resonate
+      TEST_AIO_SUBSYSTEMS_STORE_YUGABYTE_CONFIG_LOAD_BALANCE: "true"
+      # Set BENCH_TARGET=load to run the sustained load test instead.
+      BENCH_TARGET: ${BENCH_TARGET:-micro}
+      # Set BENCH_BATCH_SIZE to control how many AIO submissions are batched
+      # into a single DB transaction. Higher values amortize Raft overhead.
+      # Default 1 matches the original behaviour; try 50 or 100 for throughput.
+      BENCH_BATCH_SIZE: 1000
+      BENCH_LOAD_DURATION: ${BENCH_LOAD_DURATION:-60s}
+      BENCH_CSV_PATH: ${BENCH_CSV_PATH:-/results/load.csv}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ "$$BENCH_TARGET" = "load" ]; then
+          exec go test -run=^$$ -bench=BenchmarkYugabyteStoreLoad \
+            -benchtime=1x -timeout 60m \
+            ./internal/app/subsystems/aio/store/yugabyte/
+        else
+          export BENCH_BACKEND=yugabyte
+          export BENCH_MICRO_CSV_PATH=/results/micro_yugabyte.csv
+          exec go test -run=^$$ -bench=^BenchmarkYugabyteStore$$ \
+            -benchtime=30s -count=3 -benchmem -timeout 20m \
+            ./internal/app/subsystems/aio/store/yugabyte/
+        fi
+    depends_on:
+      yb-init:
+        condition: service_completed_successfully
+    profiles:
+      - bench

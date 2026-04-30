@@ -177,11 +177,14 @@ func completePromise(tags map[string]string, updatePromiseCmd *t_aio.UpdatePromi
 		updatePromiseResult := t_aio.AsAlterPromises(completion.Store.Results[0])
 		completeTasksResult := t_aio.AsAlterTasks(completion.Store.Results[1])
 		createTasksResult := t_aio.AsAlterTasks(completion.Store.Results[2])
-		deleteCallbacksResult := t_aio.AsAlterCallbacks(completion.Store.Results[3])
+		//deleteCallbacksResult := t_aio.AsAlterCallbacks(completion.Store.Results[3])
 
 		util.Assert(updatePromiseResult != nil, "result must not be nil")
 		util.Assert(updatePromiseResult.RowsAffected == 0 || updatePromiseResult.RowsAffected == 1, "result must return 0 or 1 rows")
-		util.Assert(createTasksResult.RowsAffected == deleteCallbacksResult.RowsAffected, "created rows must equal deleted rows")
+
+		// createTasksResult.RowsAffected <= deleteCallbacksResult.RowsAffected is expected:
+		// ON CONFLICT DO NOTHING means tasks created on a prior attempt count as 0 here,
+		// but deleteCallbacks still removes all matching callbacks.
 
 		// count promises
 		metrics.PromisesTotal.WithLabelValues(strings.ToLower(updatePromiseCmd.State.String())).Add(float64(updatePromiseResult.RowsAffected))

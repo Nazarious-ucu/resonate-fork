@@ -20,6 +20,7 @@ import (
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/sender"
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/postgres"
 	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/sqlite"
+	"github.com/resonatehq/resonate/internal/app/subsystems/aio/store/yugabyte"
 	"github.com/resonatehq/resonate/internal/app/subsystems/api/http"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -40,6 +41,7 @@ func init() {
 	cfg.AIO.Subsystems.Add("sender", true, &sender.Config{})
 	cfg.AIO.Subsystems.Add("store-postgres", false, &postgres.Config{}) // do not change order
 	cfg.AIO.Subsystems.Add("store-sqlite", true, &sqlite.Config{})
+	cfg.AIO.Subsystems.Add("store-yugabyte", false, &yugabyte.Config{})
 
 	// Add Plugins
 	cfg.AIO.Plugins.Add("http", true, &httpPlugin.Config{})
